@@ -371,6 +371,95 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
 
     return pd.DataFrame(results)
 
+import os
+
+LEDGER_FILE = "catalyst_prediction_ledger.csv"
+
+def load_prediction_ledger():
+    if os.path.exists(LEDGER_FILE):
+        df = pd.read_csv(LEDGER_FILE)
+        df["Date"] = pd.to_datetime(df["Date"])
+        return df
+    return pd.DataFrame(columns=[
+        "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
+        "Predicted_Outlook", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
+        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
+    ])
+
+def log_daily_predictions(candidates_df):
+    ledger = load_prediction_ledger()
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    
+    new_records = []
+    for _, row in candidates_df.iterrows():
+        p_id = f"{today_str}_{row['Ticker']}"
+        # Prevent duplicate entries on the same date for the same stock
+        if not ledger.empty and p_id in ledger["Prediction_ID"].values:
+            continue
+            
+        is_bullish = "Bullish" in row["1-2W Outlook"]
+        new_records.append({
+            "Prediction_ID": p_id,
+            "Date": today_str,
+            "Ticker": row["Ticker"],
+            "Active_Catalyst": row["Active Catalyst"],
+            "CMP_At_Prediction": row["CMP (₹)"],
+            "Predicted_Outlook": "BULLISH" if is_bullish else "BEARISH_FADE",
+            "Confidence": row.get("Confidence", "High"),
+            "Target_Return_Pct": 4.5 if is_bullish else -4.0,
+            "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
+            "Days_Elapsed": 0,
+            "Current_CMP": row["CMP (₹)"],
+            "Realized_Return_Pct": 0.0,
+            "Outcome_Status": "PENDING"
+        })
+    
+    if new_records:
+        updated = pd.concat([ledger, pd.DataFrame(new_records)], ignore_index=True)
+        updated.to_csv(LEDGER_FILE, index=False)
+        return len(new_records)
+    return 0
+
+def audit_and_update_outcomes(raw_data):
+    ledger = load_prediction_ledger()
+    if ledger.empty:
+        return ledger
+
+    for idx, row in ledger.iterrows():
+        if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
+            continue
+
+        sym = f"{row['Ticker']}.NS"
+        if sym in raw_data.columns.levels[0]:
+            hist = raw_data[sym]["Close"].dropna()
+            pred_date = pd.to_datetime(row["Date"])
+            post_data = hist[hist.index >= pred_date]
+
+            if len(post_data) > 1:
+                curr_p = float(post_data.iloc[-1])
+                init_p = float(row["CMP_At_Prediction"])
+                ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
+                days = len(post_data) - 1
+
+                ledger.at[idx, "Current_CMP"] = curr_p
+                ledger.at[idx, "Realized_Return_Pct"] = ret_pct
+                ledger.at[idx, "Days_Elapsed"] = days
+
+                # Evaluation criteria (5 to 10 sessions)
+                if row["Predicted_Outlook"] == "BULLISH":
+                    if ret_pct >= row["Target_Return_Pct"]:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                    elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                else:  # BEARISH_FADE
+                    if ret_pct <= row["Target_Return_Pct"]:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                    elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct < 0 else "FAILED"
+
+    ledger.to_csv(LEDGER_FILE, index=False)
+    return ledger
+
 # =====================================================================
 # Section 4: Sidebar Controls & Header
 # =====================================================================
@@ -422,11 +511,13 @@ nav_choice = st.radio(
         "🎯 Dynamic 1-2 Week Screener",
         "🔬 Single-Stock Deep Dive",
         "📰 Exchange Disclosures & Media Feed",
+        "📊 Prediction Audit & Win Rate",
         "📖 Quantitative Strategy Handbook"
     ],
     label_visibility="collapsed",
     horizontal=True
 )
+
 st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
 # Helper function for relative Top 3 / Bottom 3 color-coding
@@ -691,3 +782,60 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
         4. **Execute with Discipline:** If all conditions align, allocate standard capital. Protect with a stop-loss placed just below the low of the announcement candle.
         """
     )
+
+# VIEW 5: Prediction Audit & Win Rate Ledger
+elif nav_choice == "📊 Prediction Audit & Win Rate":
+    st.subheader("📊 Self-Auditing Prediction Ledger & Success Rate")
+    st.caption("Tracks forward-looking predictions, monitors holding periods, and computes empirical win rates.")
+
+    audited_ledger = audit_and_update_outcomes(raw_market_data)
+
+    col_btn1, col_btn2 = st.columns([1, 3])
+    with col_btn1:
+        if st.button("📥 Record Today's Top Predictions", use_container_width=True):
+            top_setups = pd.concat([
+                catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].head(3),
+                catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].head(3)
+            ])
+            added = log_daily_predictions(top_setups)
+            st.success(f"Logged {added} new predictions into the audit ledger!")
+            st.rerun()
+
+    if not audited_ledger.empty:
+        closed = audited_ledger[audited_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
+        pending = audited_ledger[audited_ledger["Outcome_Status"] == "PENDING"]
+
+        total_closed = len(closed)
+        successes = len(closed[closed["Outcome_Status"] == "SUCCESS"])
+        win_rate = round((successes / total_closed * 100.0), 1) if total_closed > 0 else 0.0
+        avg_ret = round(closed["Realized_Return_Pct"].mean(), 2) if total_closed > 0 else 0.0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Overall Realized Win Rate", f"{win_rate}%", f"{successes}/{total_closed} Calls")
+        m2.metric("Average Realized Return", f"{avg_ret:+0.2f}%")
+        m3.metric("Active Tracking (Pending)", f"{len(pending)}")
+        m4.metric("Total Predictions Logged", f"{len(audited_ledger)}")
+
+        st.markdown("---")
+        st.markdown("##### 📑 Realized Ledger History")
+        
+        def highlight_outcomes(df):
+            styles = pd.DataFrame("", index=df.index, columns=df.columns)
+            if "Outcome_Status" in df.columns:
+                styles["Outcome_Status"] = df["Outcome_Status"].apply(
+                    lambda v: "background-color: #d4edda; color: #155724; font-weight: bold;" if v == "SUCCESS"
+                    else ("background-color: #f8d7da; color: #721c24; font-weight: bold;" if v == "FAILED"
+                    else "background-color: #fff3cd; color: #856404;")
+                )
+            return styles
+
+        st.dataframe(
+            audited_ledger.style.apply(highlight_outcomes, axis=None).format({
+                "CMP_At_Prediction": "₹{:.2f}",
+                "Current_CMP": "₹{:.2f}",
+                "Realized_Return_Pct": "{:+0.2f}%"
+            }),
+            use_container_width=True
+        )
+    else:
+        st.info("No predictions recorded yet. Click 'Record Today\'s Top Predictions' above to initialize the audit trail.")
