@@ -269,6 +269,146 @@ def load_market_data(tickers):
 # =====================================================================
 # Section 3: Predictive Engine & Scoring Logic
 # =====================================================================
+import base64
+import json
+import requests
+
+LEDGER_FILENAME = "catalyst_prediction_ledger.csv"
+
+def get_github_ledger():
+    """Fetch catalyst_prediction_ledger.csv directly from GitHub Repo via API."""
+    token = st.secrets.get("GITHUB_PAT", os.environ.get("GITHUB_PAT", ""))
+    repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", ""))
+    
+    empty_df = pd.DataFrame(columns=[
+        "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
+        "Predicted_Outlook", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
+        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
+    ])
+    
+    if not token or not repo:
+        if os.path.exists(LEDGER_FILENAME):
+            return pd.read_csv(LEDGER_FILENAME), None
+        return empty_df, None
+
+    url = f"https://api.github.com/repos/{repo}/contents/{LEDGER_FILENAME}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200:
+        file_json = res.json()
+        content = base64.b64decode(file_json["content"]).decode("utf-8")
+        df = pd.read_csv(pd.io.common.StringIO(content))
+        return df, file_json["sha"]
+    elif res.status_code == 404:
+        return empty_df, None
+    else:
+        logger.warning(f"GitHub Ledger fetch failed: {res.status_code} {res.text}")
+        return empty_df, None
+
+def commit_github_ledger(updated_df, sha=None):
+    """Write updated CSV back to GitHub repository using GitHub Contents API."""
+    token = st.secrets.get("GITHUB_PAT", os.environ.get("GITHUB_PAT", ""))
+    repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", ""))
+    
+    csv_bytes = updated_df.to_csv(index=False).encode("utf-8")
+    b64_content = base64.b64encode(csv_bytes).decode("utf-8")
+    
+    if not token or not repo:
+        # Fallback to local save if credentials aren't configured yet
+        updated_df.to_csv(LEDGER_FILENAME, index=False)
+        return True
+
+    url = f"https://api.github.com/repos/{repo}/contents/{LEDGER_FILENAME}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    
+    payload = {
+        "message": f"Auto-audit: Update prediction ledger [{datetime.date.today()}]",
+        "content": b64_content
+    }
+    if sha:
+        payload["sha"] = sha
+
+    res = requests.put(url, headers=headers, data=json.dumps(payload))
+    return res.status_code in [200, 201]
+
+def log_daily_predictions_to_github(candidates_df):
+    ledger, sha = get_github_ledger()
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    
+    new_records = []
+    for _, row in candidates_df.iterrows():
+        p_id = f"{today_str}_{row['Ticker']}"
+        if not ledger.empty and p_id in ledger["Prediction_ID"].values:
+            continue
+            
+        is_bullish = "Bullish" in str(row.get("1-2W Outlook", ""))
+        new_records.append({
+            "Prediction_ID": p_id,
+            "Date": today_str,
+            "Ticker": row["Ticker"],
+            "Active_Catalyst": row["Active Catalyst"],
+            "CMP_At_Prediction": row["CMP (₹)"],
+            "Predicted_Outlook": "BULLISH" if is_bullish else "BEARISH_FADE",
+            "Confidence": row.get("Confidence", "High"),
+            "Target_Return_Pct": 4.5 if is_bullish else -4.0,
+            "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
+            "Days_Elapsed": 0,
+            "Current_CMP": row["CMP (₹)"],
+            "Realized_Return_Pct": 0.0,
+            "Outcome_Status": "PENDING"
+        })
+    
+    if new_records:
+        updated = pd.concat([ledger, pd.DataFrame(new_records)], ignore_index=True)
+        success = commit_github_ledger(updated, sha)
+        return len(new_records) if success else 0
+    return 0
+
+def audit_and_update_outcomes(raw_data):
+    ledger, sha = get_github_ledger()
+    if ledger.empty:
+        return ledger
+
+    changed = False
+    for idx, row in ledger.iterrows():
+        if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
+            continue
+
+        sym = f"{row['Ticker']}.NS"
+        if sym in raw_data.columns.levels[0]:
+            hist = raw_data[sym]["Close"].dropna()
+            pred_date = pd.to_datetime(row["Date"])
+            post_data = hist[hist.index >= pred_date]
+
+            if len(post_data) > 1:
+                curr_p = float(post_data.iloc[-1])
+                init_p = float(row["CMP_At_Prediction"])
+                ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
+                days = len(post_data) - 1
+
+                ledger.at[idx, "Current_CMP"] = curr_p
+                ledger.at[idx, "Realized_Return_Pct"] = ret_pct
+                ledger.at[idx, "Days_Elapsed"] = days
+                changed = True
+
+                # Horizon evaluation criteria (5 to 10 sessions)
+                if row["Predicted_Outlook"] == "BULLISH":
+                    if ret_pct >= row["Target_Return_Pct"]:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                    elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                else:  # BEARISH_FADE
+                    if ret_pct <= row["Target_Return_Pct"]:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                    elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
+                        ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct < 0 else "FAILED"
+
+    if changed:
+        commit_github_ledger(ledger, sha)
+    return ledger
+    
+
 def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
     if raw_data.empty:
         return pd.DataFrame()
@@ -459,6 +599,8 @@ def audit_and_update_outcomes(raw_data):
 
     ledger.to_csv(LEDGER_FILE, index=False)
     return ledger
+
+
 
 # =====================================================================
 # Section 4: Sidebar Controls & Header
@@ -797,10 +939,10 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
         """
     )
 
-# VIEW 5: Prediction Audit & Win Rate Ledger
+# VIEW 5: Prediction Audit & Win Rate Ledger (GitHub Backed)
 elif nav_choice == "📊 Prediction Audit & Win Rate":
     st.subheader("📊 Self-Auditing Prediction Ledger & Success Rate")
-    st.caption("Tracks forward-looking predictions, monitors holding periods, and computes empirical win rates.")
+    st.caption("Auto-synced to GitHub Repository. Monitors holding horizons and logs empirical win rates.")
 
     audited_ledger = audit_and_update_outcomes(raw_market_data)
 
@@ -811,9 +953,12 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
                 catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].head(3),
                 catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].head(3)
             ])
-            added = log_daily_predictions(top_setups)
-            st.success(f"Logged {added} new predictions into the audit ledger!")
-            st.rerun()
+            added = log_daily_predictions_to_github(top_setups)
+            if added > 0:
+                st.success(f"✅ Committed {added} new predictions to GitHub repository ledger!")
+                st.rerun()
+            else:
+                st.info("Today's setups are already recorded in the ledger.")
 
     if not audited_ledger.empty:
         closed = audited_ledger[audited_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
@@ -825,14 +970,14 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         avg_ret = round(closed["Realized_Return_Pct"].mean(), 2) if total_closed > 0 else 0.0
 
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Overall Realized Win Rate", f"{win_rate}%", f"{successes}/{total_closed} Calls")
-        m2.metric("Average Realized Return", f"{avg_ret:+0.2f}%")
+        m1.metric("Realized Win Rate", f"{win_rate}%", f"{successes}/{total_closed} Completed")
+        m2.metric("Average Return (Completed)", f"{avg_ret:+0.2f}%")
         m3.metric("Active Tracking (Pending)", f"{len(pending)}")
-        m4.metric("Total Predictions Logged", f"{len(audited_ledger)}")
+        m4.metric("Total Ledger Entries", f"{len(audited_ledger)}")
 
         st.markdown("---")
-        st.markdown("##### 📑 Realized Ledger History")
-        
+        st.markdown("##### 📑 Ledger Audit Trail")
+
         def highlight_outcomes(df):
             styles = pd.DataFrame("", index=df.index, columns=df.columns)
             if "Outcome_Status" in df.columns:
@@ -847,9 +992,12 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
             audited_ledger.style.apply(highlight_outcomes, axis=None).format({
                 "CMP_At_Prediction": "₹{:.2f}",
                 "Current_CMP": "₹{:.2f}",
-                "Realized_Return_Pct": "{:+0.2f}%"
+                "Realized_Return_Pct": "{:+0.2f}%",
+                "Target_Return_Pct": "{:+0.1f}%",
+                "Stop_Loss_Pct": "{:+0.1f}%"
             }),
             use_container_width=True
         )
     else:
-        st.info("No predictions recorded yet. Click 'Record Today\'s Top Predictions' above to initialize the audit trail.")
+        st.info("No predictions recorded yet. Click 'Record Today\'s Top Predictions' to initialize the audit trail.")
+
