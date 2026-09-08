@@ -517,18 +517,7 @@ with h_col3:
         st.cache_data.clear()
         st.rerun()
 
-# Top Header Bar utilizing right-hand space
-h_col1, h_col2 = st.columns([1.6, 1.4])
-h_col1.markdown(f"### ⚡ Catalyst Pulse Pro <span style='font-size:0.85rem; color:#6c757d;'>| NIFTY 100 Corporate Action & Expectation Radar</span>", unsafe_allow_html=True)
-h_col2.markdown(
-    f"""
-    <div style='text-align: right; padding-top: 5px; font-size: 0.85rem;'>
-        <b>Market Mood:</b> {vix_mood} (VIX: {curr_vix:.1f}) &nbsp;|&nbsp; 
-        <b>Exchange Feeds:</b> <span style='color: #28a745; font-weight: 600;'>Active (BSE / Reg 30)</span>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+
 
 nav_choice = st.radio(
     "Navigation",
