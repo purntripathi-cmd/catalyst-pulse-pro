@@ -1,0 +1,87 @@
+name: Catalyst Daily Outcome Auditor
+
+on:
+  schedule:
+    - cron: '30 10 * * 1-5' # 4:00 PM IST Mon-Fri
+  workflow_dispatch:
+
+jobs:
+  audit-and-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install pandas yfinance requests
+
+      - name: Audit Ledger Outcomes
+        run: |
+          python -c '
+          import os, datetime
+          import pandas as pd
+          import yfinance as yf
+
+          file_path = "catalyst_prediction_ledger.csv"
+          if not os.path.exists(file_path):
+              print("No ledger found. Skipping.")
+              exit(0)
+
+          ledger = pd.read_csv(file_path)
+          pending = ledger[ledger["Outcome_Status"] == "PENDING"]
+          if pending.empty:
+              print("No pending predictions to audit.")
+              exit(0)
+
+          tickers = [f"{t}.NS" for t in pending["Ticker"].unique()]
+          raw = yf.download(tickers, period="1mo", interval="1d", group_by="ticker", auto_adjust=True)
+
+          changed = False
+          for idx, row in ledger.iterrows():
+              if row["Outcome_Status"] != "PENDING":
+                  continue
+              sym = f"{row[\"Ticker\"]}.NS"
+              if sym in raw.columns.levels[0]:
+                  hist = raw[sym]["Close"].dropna()
+                  pred_date = pd.to_datetime(row["Date"])
+                  post = hist[hist.index >= pred_date]
+                  if len(post) > 1:
+                      curr_p = float(post.iloc[-1])
+                      init_p = float(row["CMP_At_Prediction"])
+                      ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
+                      days = len(post) - 1
+
+                      ledger.at[idx, "Current_CMP"] = curr_p
+                      ledger.at[idx, "Realized_Return_Pct"] = ret_pct
+                      ledger.at[idx, "Days_Elapsed"] = days
+                      changed = True
+
+                      if row["Predicted_Outlook"] == "BULLISH":
+                          if ret_pct >= row["Target_Return_Pct"]:
+                              ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                          elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
+                              ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                      else:
+                          if ret_pct <= row["Target_Return_Pct"]:
+                              ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                          elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
+                              ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct < 0 else "FAILED"
+
+          if changed:
+              ledger.to_csv(file_path, index=False)
+              print("Ledger audited and updated.")
+          '
+
+      - name: Commit & Push to GitHub
+        run: |
+          git config --global user.name "CatalystAuditDaemon"
+          git config --global user.email "daemon@catalystpulse.internal"
+          git add catalyst_prediction_ledger.csv
+          git diff --staged --quiet || (git commit -m "Auto-audit: Update prediction outcomes [skip ci]" && git push)
