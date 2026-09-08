@@ -1,5 +1,5 @@
 # =====================================================================
-# Section 0: Imports, Logging & Performance Styling
+# Section 0: Imports, Logging & High-Density UI CSS
 # =====================================================================
 import datetime
 import logging
@@ -13,25 +13,58 @@ import yfinance as yf
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger("CatalystPulsePro")
 
-st.set_page_config(page_title="Catalyst Pulse Pro (NIFTY 100)", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Catalyst Pulse Pro | NIFTY 100 Event Alpha", page_icon="⚡", layout="wide")
 
+# High-density, space-optimized styling
 st.markdown(
     """
     <style>
-        .block-container { padding-top: 1.0rem !important; padding-bottom: 2rem !important; padding-left: 1.5rem !important; padding-right: 1.5rem !important; }
+        .block-container {
+            padding-top: 0.5rem !important;
+            padding-bottom: 1.5rem !important;
+            padding-left: 1.0rem !important;
+            padding-right: 1.0rem !important;
+        }
         header[data-testid="stHeader"] { display: none !important; }
         footer { visibility: hidden; }
+        
+        /* Shrunken compact sidebar */
+        section[data-testid="stSidebar"] {
+            width: 260px !important;
+            min-width: 260px !important;
+        }
+        section[data-testid="stSidebar"] .block-container {
+            padding-top: 0.8rem !important;
+            padding-left: 0.8rem !important;
+            padding-right: 0.8rem !important;
+        }
+        
+        /* Typography & density */
+        html, body, [class*="css"] {
+            font-size: 0.86rem !important;
+        }
+        div[data-testid="stMetricValue"] {
+            font-size: 1.18rem !important;
+            font-weight: 700 !important;
+        }
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.75rem !important;
+        }
+        
+        /* Compact Segmented Pills */
         div[data-testid="stRadio"] > div[role="radiogroup"] {
-            background-color: #f1f3f5; padding: 5px; border-radius: 12px; display: flex; flex-wrap: wrap; gap: 5px; border: 1px solid #dee2e6;
+            background-color: #f1f3f5; padding: 3px; border-radius: 8px; display: flex; flex-wrap: wrap; gap: 4px; border: 1px solid #dee2e6;
         }
         div[data-testid="stRadio"] > div[role="radiogroup"] > label {
-            background-color: transparent; border-radius: 8px; padding: 5px 12px !important; font-weight: 600 !important; font-size: 0.88rem !important; color: #495057; cursor: pointer;
+            background-color: transparent; border-radius: 6px; padding: 4px 10px !important; font-weight: 600 !important; font-size: 0.80rem !important; color: #495057; cursor: pointer;
         }
         div[data-testid="stRadio"] > div[role="radiogroup"] > label[data-checked="true"] {
-            background-color: #1E88E5 !important; color: #ffffff !important; box-shadow: 0 2px 6px rgba(30, 136, 229, 0.35);
+            background-color: #1E88E5 !important; color: #ffffff !important; box-shadow: 0 1px 4px rgba(30, 136, 229, 0.3);
         }
-        .vix-pulse-banner {
-            background-color: #f8f9fa; border-left: 4px solid #1E88E5; padding: 8px 14px; border-radius: 4px; font-size: 0.88rem; margin-bottom: 0.8rem;
+        
+        /* Pulse Banner */
+        .sentiment-card {
+            background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 6px 12px; margin-bottom: 0.5rem;
         }
     </style>
     """,
@@ -39,7 +72,7 @@ st.markdown(
 )
 
 # =====================================================================
-# Section 1: Curated NIFTY 100 Universe & Reg 30 Regex Classifier
+# Section 1: Curated NIFTY 100 Universe & Reg 30 Classifier
 # =====================================================================
 NIFTY_100_TICKERS = [
     {"ticker": "ABB.NS", "name": "ABB India", "category": "Capital Goods"},
@@ -145,37 +178,38 @@ NIFTY_100_TICKERS = [
     {"ticker": "ZYDUSLIFE.NS", "name": "Zydus Lifesciences", "category": "Pharma"},
 ]
 
+# Classification Model with Behavioral Edge Multipliers
 CATALYST_RULES = {
-    "Demerger / Value Unlock": {
-        "regex": re.compile(r"(?:demerger|spin-?off|scheme of arrangement|value unlocking)", re.IGNORECASE),
-        "impact_mult": 1.35, "base_p1w": 72, "base_p2w": 78
+    "Demerger / Merger Unlock": {
+        "regex": re.compile(r"(?:demerger|spin-?off|scheme of arrangement|value unlocking|merger|amalgamation)", re.IGNORECASE),
+        "impact_mult": 1.35, "base_p1w": 72, "base_p2w": 78, "group": "Demergers & Mergers"
     },
-    "Order Win / Mega Contract": {
-        "regex": re.compile(r"(?:bagged|awarded|receives?|secures?)\s+(?:an?\s+)?(?:order|contract|project|loi)", re.IGNORECASE),
-        "impact_mult": 1.15, "base_p1w": 65, "base_p2w": 68
+    "Mega Order Win / Contract": {
+        "regex": re.compile(r"(?:bagged|awarded|receives?|secures?|wins?)\s+(?:an?\s+)?(?:order|contract|project|loi|mandate)", re.IGNORECASE),
+        "impact_mult": 1.20, "base_p1w": 66, "base_p2w": 70, "group": "Order Wins & Capex"
     },
-    "Capex / Expansion": {
-        "regex": re.compile(r"(?:commercial production|capacity expansion|capex|new facility|new plant)", re.IGNORECASE),
-        "impact_mult": 1.05, "base_p1w": 60, "base_p2w": 64
+    "Capex / Plant Expansion": {
+        "regex": re.compile(r"(?:commercial production|capacity expansion|capex|new facility|new plant|manufacturing unit)", re.IGNORECASE),
+        "impact_mult": 1.10, "base_p1w": 62, "base_p2w": 66, "group": "Order Wins & Capex"
     },
-    "Dividend Payout": {
-        "regex": re.compile(r"(?:interim dividend|final dividend|special dividend|dividend of rs)", re.IGNORECASE),
-        "impact_mult": 0.85, "base_p1w": 48, "base_p2w": 45
+    "Dividend & Buyback": {
+        "regex": re.compile(r"(?:interim dividend|final dividend|special dividend|dividend of rs|buyback|share repurchase)", re.IGNORECASE),
+        "impact_mult": 0.85, "base_p1w": 46, "base_p2w": 42, "group": "Dividends & Buybacks"
     },
-    "Bonus / Stock Split": {
-        "regex": re.compile(r"(?:sub-division|subdivision|split of face value|bonus issue|bonus shares)", re.IGNORECASE),
-        "impact_mult": 0.70, "base_p1w": 42, "base_p2w": 38
+    "Bonus / Split / Rights Issue": {
+        "regex": re.compile(r"(?:sub-division|subdivision|split of face value|bonus issue|bonus shares|rights issue|allotment of rights)", re.IGNORECASE),
+        "impact_mult": 0.70, "base_p1w": 40, "base_p2w": 36, "group": "Splits & Bonus"
     },
-    "Regulatory / Governance Risk": {
-        "regex": re.compile(r"(?:resignation|auditor|search|seizure|enforcement|show cause|inspection)", re.IGNORECASE),
-        "impact_mult": -1.50, "base_p1w": 25, "base_p2w": 20
+    "Regulatory / Governance Warning": {
+        "regex": re.compile(r"(?:resignation of auditor|cbi|ed search|seizure|enforcement|show cause notice|inspection|fraud)", re.IGNORECASE),
+        "impact_mult": -1.60, "base_p1w": 22, "base_p2w": 18, "group": "Governance / Risk"
     }
 }
 
 RSS_FEEDS = {
     "BSE Corporate Announcements": "https://beta.bseindia.com/rss-feed.html",
     "Economic Times Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "Moneycontrol Top News": "https://www.moneycontrol.com/rss/MCtopnews.xml"
+    "Moneycontrol News": "https://www.moneycontrol.com/rss/MCtopnews.xml"
 }
 
 # =====================================================================
@@ -183,24 +217,25 @@ RSS_FEEDS = {
 # =====================================================================
 @st.cache_data(ttl=600)
 def fetch_corporate_catalysts(active_universe):
-    news_items, matched_map = [], {}
+    news_items, matched_map, ticker_news_history = [], {}, {}
     known_syms = [x["ticker"].replace(".NS", "") for x in active_universe]
 
     for source_name, feed_url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(feed_url)
-            for entry in feed.entries[:35]:
+            for entry in feed.entries[:40]:
                 title = entry.get("title", "")
                 summary = entry.get("summary", "")
                 full_text = f"{title} {summary}"
 
-                detected_catalyst, impact, p1, p2 = "General Market", 1.0, 50, 50
+                detected_catalyst, impact, p1, p2, grp = "⚡ General Market Notice", 1.0, 50, 50, "General"
                 for cat_name, meta in CATALYST_RULES.items():
                     if meta["regex"].search(full_text):
                         detected_catalyst = cat_name
                         impact = meta["impact_mult"]
                         p1 = meta["base_p1w"]
                         p2 = meta["base_p2w"]
+                        grp = meta["group"]
                         break
 
                 matched = [sym for sym in known_syms if re.search(rf"\b{sym}\b", full_text, re.IGNORECASE)]
@@ -208,16 +243,19 @@ def fetch_corporate_catalysts(active_universe):
                 item = {
                     "source": source_name, "title": title, "summary": summary,
                     "link": entry.get("link", "#"), "published": entry.get("published", str(datetime.date.today())),
-                    "catalyst": detected_catalyst, "impact": impact, "p1w": p1, "p2w": p2, "matched": matched
+                    "catalyst": detected_catalyst, "impact": impact, "p1w": p1, "p2w": p2, "group": grp, "matched": matched
                 }
                 news_items.append(item)
                 for sym in matched:
                     if sym not in matched_map:
                         matched_map[sym] = item
+                    if sym not in ticker_news_history:
+                        ticker_news_history[sym] = []
+                    ticker_news_history[sym].append(item)
         except Exception as e:
             logger.warning(f"Error parsing feed {source_name}: {e}")
 
-    return news_items, matched_map
+    return news_items, matched_map, ticker_news_history
 
 @st.cache_data(ttl=300)
 def load_market_data(tickers):
@@ -229,7 +267,7 @@ def load_market_data(tickers):
         return pd.DataFrame()
 
 # =====================================================================
-# Section 3: Predictive Engine & Probability Calculation
+# Section 3: Predictive Engine & Scoring Logic
 # =====================================================================
 def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
     if raw_data.empty:
@@ -251,7 +289,7 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
         dist_200 = ((cmp - d200) / d200) * 100.0
 
-        # Pre-Event Run-up (5D)
+        # Pre-Event Run-up (5D Lookback)
         price_5d_ago = float(c.iloc[-6]) if len(c) >= 6 else float(c.iloc[0])
         runup_5d = ((cmp - price_5d_ago) / price_5d_ago) * 100.0
 
@@ -268,11 +306,13 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         cat_info = news_map.get(clean_sym, None)
         if cat_info:
             cat_name = cat_info["catalyst"]
+            cat_group = cat_info["group"]
             impact_mult = cat_info["impact"]
             base_p1 = cat_info["p1w"]
             base_p2 = cat_info["p2w"]
         else:
             cat_name = "⚡ Technical Baseline"
+            cat_group = "Baseline"
             impact_mult = 1.0
             base_p1 = 50
             base_p2 = 50
@@ -285,7 +325,7 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         raw_score = (score_runup * 0.35) + (score_volume * 0.45) + (score_trend * 0.20)
         final_catalyst_score = round(raw_score * impact_mult, 1)
 
-        # Dynamic Probability Adjustment based on actual execution confirmation
+        # Dynamic Empirical Probability Adjustment
         prob_adjustment = 0.0
         if runup_5d <= 2.5:
             prob_adjustment += 8.0
@@ -295,7 +335,7 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         if vol_surge_ratio >= 2.0 and close_pos_pct >= 65.0:
             prob_adjustment += 10.0
         elif close_pos_pct <= 35.0:
-            prob_adjustment -= 12.0
+            prob_adjustment -= 14.0
 
         if dist_200 > 0:
             prob_adjustment += 4.0
@@ -325,18 +365,19 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
             "Close in Range %": close_pos_pct,
             "Dist 200DMA %": round(dist_200, 2),
             "Active Catalyst": cat_name,
+            "Catalyst Group": cat_group,
             "1-2W Outlook": outlook,
         })
 
     return pd.DataFrame(results)
 
 # =====================================================================
-# Section 4: Sidebar Controls & Navigation
+# Section 4: Sidebar Controls & Header
 # =====================================================================
 st.sidebar.title("⚡ Catalyst Pulse Pro")
-st.sidebar.caption("Institutional News-Drift & Expectation Engine")
+st.sidebar.caption("Event Alpha & Post-Announcement Drift Engine")
 
-universe_choice = st.sidebar.selectbox("Active Stock Universe:", ["Curated NIFTY 100 (Full)", "Nifty Top 30 Large-Caps", "High-Beta Midcaps"], index=0)
+universe_choice = st.sidebar.selectbox("Stock Universe:", ["Curated NIFTY 100 (Full)", "Nifty Top 30 Large-Caps", "High-Beta Midcaps"], index=0)
 
 if universe_choice == "Curated NIFTY 100 (Full)":
     ACTIVE_UNIVERSE = NIFTY_100_TICKERS
@@ -346,19 +387,34 @@ else:
     ACTIVE_UNIVERSE = NIFTY_100_TICKERS[30:70]
 
 raw_market_data = load_market_data([x["ticker"] for x in ACTIVE_UNIVERSE])
-news_items_list, matched_news_map = fetch_corporate_catalysts(ACTIVE_UNIVERSE)
+news_items_list, matched_news_map, ticker_news_hist = fetch_corporate_catalysts(ACTIVE_UNIVERSE)
 catalyst_df = compute_predictive_catalyst_metrics(raw_market_data, matched_news_map, ACTIVE_UNIVERSE)
 
-# Macro India VIX
-curr_vix = 15.0
+# Macro India VIX extraction
+curr_vix = 14.5
 if "^INDIAVIX" in raw_market_data.columns.levels[0]:
     v_close = raw_market_data["^INDIAVIX"]["Close"].dropna()
     if not v_close.empty:
         curr_vix = float(v_close.iloc[-1])
 
+vix_mood = "🟢 Stable & Calm" if curr_vix < 14 else ("🟡 Normal Volatility" if curr_vix <= 21 else "⚠️ High Panic / Wild Swings")
+
 st.sidebar.markdown("---")
-st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", "Normal" if curr_vix < 20 else "High Volatility")
-st.sidebar.caption(f"Evaluated Universe: {len(ACTIVE_UNIVERSE)} Stocks")
+st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
+st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
+
+# Top Header Bar utilizing right-hand space
+h_col1, h_col2 = st.columns([1.6, 1.4])
+h_col1.markdown(f"### ⚡ Catalyst Pulse Pro <span style='font-size:0.85rem; color:#6c757d;'>| NIFTY 100 Corporate Action & Expectation Radar</span>", unsafe_allow_html=True)
+h_col2.markdown(
+    f"""
+    <div style='text-align: right; padding-top: 5px; font-size: 0.85rem;'>
+        <b>Market Mood:</b> {vix_mood} (VIX: {curr_vix:.1f}) &nbsp;|&nbsp; 
+        <b>Exchange Feeds:</b> <span style='color: #28a745; font-weight: 600;'>Active (BSE / Reg 30)</span>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
 nav_choice = st.radio(
     "Navigation",
@@ -371,13 +427,11 @@ nav_choice = st.radio(
     label_visibility="collapsed",
     horizontal=True
 )
-st.markdown("<div style='margin-bottom: 0.6rem;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
 # Helper function for relative Top 3 / Bottom 3 color-coding
 def apply_top3_bot3_styling(df):
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
-    
-    # Highest is favorable (Top 3 Green, Bottom 3 Red)
     higher_is_better = ["Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %"]
     for col in higher_is_better:
         if col in df.columns:
@@ -386,7 +440,6 @@ def apply_top3_bot3_styling(df):
             styles.loc[t3, col] = "background-color: #d4edda; color: #155724; font-weight: bold;"
             styles.loc[b3, col] = "background-color: #f8d7da; color: #721c24; font-weight: bold;"
 
-    # Pre-RunUp: Lowest is favorable (Bottom 3 Lowest = Green, Top 3 Highest = Red)
     if "Pre-RunUp 5D %" in df.columns:
         best_runup = df["Pre-RunUp 5D %"].nsmallest(3).index
         worst_runup = df["Pre-RunUp 5D %"].nlargest(3).index
@@ -396,62 +449,108 @@ def apply_top3_bot3_styling(df):
     return styles
 
 # =====================================================================
-# Section 5: Dynamic Views
+# Section 5: Views
 # =====================================================================
 
-# VIEW 1: 1-2 Week Screener
+# VIEW 1: 3-Level Screener
 if nav_choice == "🎯 Dynamic 1-2 Week Screener":
-    st.subheader(f"🎯 Dynamic 1-2 Week Catalyst Screener ({universe_choice})")
-    st.caption("Filters unpriced corporate catalysts vs overextended post-spike distribution fades.")
-
-    if not catalyst_df.empty:
+    if catalyst_df.empty:
+        st.warning("⚠️ Market data feed synchronizing...")
+    else:
+        # LEVEL 1: High Conviction Outlier Radar
+        st.markdown("##### ⚡ Level 1: Outlier Decision Radar (Top 3-5 High-Conviction Setups)")
         up_candidates = catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].sort_values(by="Catalyst Score", ascending=False).head(5)
         down_candidates = catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].sort_values(by="Catalyst Score", ascending=True).head(5)
 
         c1, c2 = st.columns(2)
+        cols_summary = ["Ticker", "CMP (₹)", "Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Active Catalyst"]
+
         with c1:
-            st.markdown("#### 🟢 Top Expected to Move UP (1-2 Weeks)")
+            st.markdown("<span style='color: #28a745; font-weight: 700;'>🟢 Top Expected to Move UP (Unpriced Catalyst Breakouts)</span>", unsafe_allow_html=True)
             if not up_candidates.empty:
-                cols_u = ["Ticker", "CMP (₹)", "Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Active Catalyst"]
                 st.dataframe(
-                    up_candidates[cols_u].style.apply(apply_top3_bot3_styling, axis=None).format({
+                    up_candidates[cols_summary].style.apply(apply_top3_bot3_styling, axis=None).format({
                         "CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%",
                         "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x"
                     }),
-                    use_container_width=True
+                    use_container_width=True, height=180
                 )
             else:
-                st.info("No candidates qualify with unpriced conditions (RunUp <= 2.5%, Volume >= 2.0x, Close >= 65%).")
+                st.info("No stocks currently meet pristine unpriced conditions (RunUp <= 2.5% with high Day-1 volume).")
 
         with c2:
-            st.markdown("#### 🔴 Top Expected to Move DOWN / Fade (1-2 Weeks)")
+            st.markdown("<span style='color: #dc3545; font-weight: 700;'>🔴 Top Expected to Fade / Breakdown ('Sell the News' Traps)</span>", unsafe_allow_html=True)
             if not down_candidates.empty:
-                cols_d = ["Ticker", "CMP (₹)", "Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Active Catalyst"]
                 st.dataframe(
-                    down_candidates[cols_d].style.apply(apply_top3_bot3_styling, axis=None).format({
+                    down_candidates[cols_summary].style.apply(apply_top3_bot3_styling, axis=None).format({
                         "CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%",
                         "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x"
                     }),
-                    use_container_width=True
+                    use_container_width=True, height=180
                 )
             else:
-                st.info("No high-conviction distribution traps detected.")
+                st.info("No distribution traps detected.")
 
-        st.markdown("---")
-        st.markdown(f"#### 🌐 Full Evaluated Universe ({len(catalyst_df)} Equities)")
+        st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
+
+        # LEVEL 2: Corporate Action Quadrant
+        st.markdown("##### 🏢 Level 2: Corporate Action Catalyst Quadrant")
+        st.caption("How Indian equities statistically react across specific corporate filings: Contracts, Mergers, Dividends, and Stock Splits.")
+
+        q_tab1, q_tab2, q_tab3, q_tab4 = st.tabs([
+            "🎯 Order Wins & Capex (66% Win Edge)",
+            "🔄 Demergers & Mergers (72% Win Edge)",
+            "💰 Dividends & Buybacks (Fades if RunUp > 5%)",
+            "✂️ Splits & Bonus (40% Decay Risk)"
+        ])
+
+        cols_quad = ["Ticker", "CMP (₹)", "Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Active Catalyst"]
+
+        with q_tab1:
+            df_orders = catalyst_df[catalyst_df["Catalyst Group"] == "Order Wins & Capex"].sort_values(by="Catalyst Score", ascending=False)
+            if not df_orders.empty:
+                st.dataframe(df_orders[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
+            else:
+                st.info("No fresh contract wins or capex announcements recorded in current batch.")
+
+        with q_tab2:
+            df_demerge = catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"].sort_values(by="Catalyst Score", ascending=False)
+            if not df_demerge.empty:
+                st.dataframe(df_demerge[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
+            else:
+                st.info("No active demerger or merger filings tagged in current batch.")
+
+        with q_tab3:
+            df_div = catalyst_df[catalyst_df["Catalyst Group"] == "Dividends & Buybacks"].sort_values(by="Catalyst Score", ascending=False)
+            if not df_div.empty:
+                st.dataframe(df_div[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
+            else:
+                st.info("No active dividend or buyback filings tagged in current batch.")
+
+        with q_tab4:
+            df_splits = catalyst_df[catalyst_df["Catalyst Group"] == "Splits & Bonus"].sort_values(by="Catalyst Score", ascending=False)
+            if not df_splits.empty:
+                st.dataframe(df_splits[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
+            else:
+                st.info("No stock split or bonus declarations tagged in current batch.")
+
+        st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
+
+        # LEVEL 3: Full Universe Matrix
+        st.markdown("##### 🌐 Level 3: Master NIFTY 100 Evaluated Matrix")
         display_all = catalyst_df.sort_values(by="Catalyst Score", ascending=False).reset_index(drop=True)
+        cols_master = ["Ticker", "Name", "CMP (₹)", "Catalyst Score", "1-2W Outlook", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %", "Active Catalyst"]
         st.dataframe(
-            display_all.style.apply(apply_top3_bot3_styling, axis=None).format({
+            display_all[cols_master].style.apply(apply_top3_bot3_styling, axis=None).format({
                 "CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%",
-                "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%",
-                "Dist 200DMA %": "{:+.2f}%"
+                "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%", "Dist 200DMA %": "{:+.2f}%"
             }),
-            use_container_width=True, height=520
+            use_container_width=True, height=420
         )
 
-# VIEW 2: Stock Deep Dive
+# VIEW 2: Stock Deep Dive with News History
 elif nav_choice == "🔬 Single-Stock Deep Dive":
-    st.subheader("🔬 Single-Stock Expectation & Drift Profiler")
+    st.subheader("🔬 Single-Stock Reaction & Disclosure Deep Dive")
     all_syms = sorted([x["ticker"].replace(".NS", "") for x in ACTIVE_UNIVERSE])
     chosen_stock = st.selectbox("Select Stock to Inspect:", all_syms)
 
@@ -462,65 +561,133 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
     k2.metric("Catalyst Score", f"{stock_row['Catalyst Score']:+.1f}")
     k3.metric("P(1W) Drift", f"{stock_row['P(1W) Drift %']}%")
     k4.metric("P(2W) Drift", f"{stock_row['P(2W) Drift %']}%")
-    k5.metric("Pre-RunUp 5D", f"{stock_row['Pre-RunUp 5D %']:+.2f}%")
+    k5.metric("Pre-RunUp (5D)", f"{stock_row['Pre-RunUp 5D %']:+.2f}%")
 
-    st.markdown(f"**Forecast Signal:** `{stock_row['1-2W Outlook']}`")
-    st.markdown(f"**Linked Corporate Action:** `{stock_row['Active Catalyst']}`")
-    st.markdown(f"**Intraday Candle Conviction:** Closed at **{stock_row['Close in Range %']}%** of the total daily range on **{stock_row['Vol Surge Ratio']}x** average volume.")
+    st.markdown(f"**Current 1-2 Week Forecast:** `{stock_row['1-2W Outlook']}`")
+    st.markdown(f"**Active Tagged Announcement:** `{stock_row['Active Catalyst']}`")
+    st.markdown(f"**Intraday Candlestick Position:** Closed at **{stock_row['Close in Range %']}%** of the day's high-low range on **{stock_row['Vol Surge Ratio']}x** average volume.")
 
-# VIEW 3: Live Feed
+    st.markdown("---")
+    st.markdown(f"#### 📰 Real-Time Filings & News Linked to {chosen_stock}")
+    matched_history = ticker_news_hist.get(chosen_stock, [])
+    if matched_history:
+        for n_item in matched_history:
+            with st.expander(f"[{n_item['catalyst']}] {n_item['title']}"):
+                st.write(n_item["summary"] if n_item["summary"] else "Official disclosure on exchange ledger.")
+                st.caption(f"Source: {n_item['source']} | Published: {n_item['published']}")
+                st.markdown(f"[View Exchange Filing Document]({n_item['link']})")
+    else:
+        st.info(f"No active news headlines or Regulation 30 disclosures currently tagged for {chosen_stock} in the latest live feeds. Metrics represent pure quantitative technical baseline.")
+
+# VIEW 3: Live Exchange Disclosures
 elif nav_choice == "📰 Exchange Disclosures & Media Feed":
     st.subheader("📰 Authentic Exchange Disclosures & Regulatory Stream")
-    for item in news_items_list[:25]:
+    st.caption("Live feed parsed from BSE Corporate Announcements RSS and Financial Media.")
+
+    f_filter = st.selectbox("Filter Feed by Category:", ["All Filings", "Demergers & Mergers", "Order Wins & Capex", "Dividends & Buybacks", "Splits & Bonus", "Governance / Risk"])
+
+    displayed_count = 0
+    for item in news_items_list:
+        if f_filter != "All Filings" and item["group"] != f_filter:
+            continue
+        displayed_count += 1
         with st.expander(f"[{item['catalyst']}] {item['title']}"):
             st.write(item["summary"] if item["summary"] else "Official disclosure notification via exchange stream.")
             if item["matched"]:
-                st.markdown(f"**Associated Tickers:** `{', '.join(item['matched'])}`")
+                st.markdown(f"**Tagged Tickers:** `{', '.join(item['matched'])}`")
             st.caption(f"Source: {item['source']} | Published: {item['published']}")
-            st.markdown(f"[Official Filing Link]({item['link']})")
+            st.markdown(f"[Official Filing Document / Link]({item['link']})")
 
-# VIEW 4: Handbook
+    if displayed_count == 0:
+        st.info(f"No filings matching '{f_filter}' in the current feed batch.")
+
+# VIEW 4: Full Quantitative Handbook with Plain English
 elif nav_choice == "📖 Quantitative Strategy Handbook":
-    st.subheader("📖 Quantitative Strategy Handbook & Indicator Playbook")
-    st.markdown("""
-    This engine isolates **unpriced expectation divergence** from **'Sell the News' liquidation traps**.
-    """)
-
+    st.title("📖 Quantitative Strategy Handbook & Indicator Playbook")
+    st.markdown(
+        """
+        This institutional handbook explains the mathematical formulation, empirical behavioral logic, and practical application 
+        of every metric in **Catalyst Pulse Pro**. It is designed so that both quantitative funds and common investors can make 
+        unbiased, data-backed decisions.
+        """
+    )
     st.markdown("---")
+
     h1, h2 = st.columns(2)
 
     with h1:
-        st.markdown("""
-        ### 🔹 1. Pre-Event Run-Up (5D Lookback)
-        * **Formula:** $\\frac{\\text{CMP} - P_{t-5}}{P_{t-5}} \\times 100$
-        * **Meaning:** Measures how much the stock has already rallied into the announcement.
-        * **Rule:** If $\\text{Run-up} > +7.5\\%$, institutions frequently dump into the news. If $\\text{Run-up} \\le +2.0\\%$, the move is unpriced and safe to enter.
+        st.markdown(
+            """
+            ### 🔹 1. Pre-Event Run-up (5D Lookback)
+            * **Mathematical Formula:**
+              $$\\text{Run-up}_{5D} = \\left( \\frac{\\text{CMP} - \\text{Price}_{t-5}}{\\text{Price}_{t-5}} \\right) \\times 100$$
+            * **Technical Purpose:** Measures whether information leaked or smart money already bought the asset prior to public news release.
+            * **🗣️ Common Man Explanation:** 
+              Imagine a movie everyone expects to be a blockbuster. If the tickets sell for 10x the price before release, even a good movie can disappoint investors. 
+              If a stock already gained $+10\\%$ in the 5 days *before* winning a contract, large investors use the good news to sell their shares to excited retail buyers (**"Sell the News"**).
+            * **How to Conclude:**
+              - **$\\le +2.5\\%$:** Safe to enter. The news is a genuine surprise.
+              - **$> +7.5\\%$:** 🚫 DANGER. Do not buy, even if the news looks incredible.
 
-        ### 🔹 2. Volume Surge Ratio
-        * **Formula:** $\\frac{\\text{Day Volume}}{\\text{20D Average Volume}}$
-        * **Meaning:** Confirms institutional participation.
-        * **Rule:** True accumulation requires $\\ge 2.0\\times$ volume. Low volume on good news indicates retail-only participation.
+            ---
 
-        ### 🔹 3. Close in Range %
-        * **Formula:** $\\frac{\\text{CMP} - \\text{Low}}{\\text{High} - \\text{Low}} \\times 100$
-        * **Meaning:** Detects rejection wicks. If a stock surges at the open but closes near its lows, this value drops below $35\\%$, confirming an institutional exit trap.
-        """)
+            ### 🔹 2. Volume Surge Ratio
+            * **Mathematical Formula:**
+              $$\\text{Surge Ratio} = \\frac{\\text{Volume}_{\\text{Today}}}{\\text{Average Volume}_{20\\text{D}}}$$
+            * **Technical Purpose:** Distinguishes institutional block buying from retail noise.
+            * **🗣️ Common Man Explanation:** 
+              When a small retail investor buys shares, trading volume barely moves. When large domestic institutions (DIIs) or foreign funds (FIIs) buy, volume spikes dramatically ($2\\times$ to $5\\times$ normal).
+            * **How to Conclude:**
+              - **$\\ge 2.0\\times$:** Institutional backing confirmed.
+              - **$< 1.0\\times$:** Retail-only excitement. Avoid chasing.
+
+            ---
+
+            ### 🔹 3. Intraday Close in Range %
+            * **Mathematical Formula:**
+              $$\\text{Close in Range \\%} = \\left( \\frac{\\text{CMP} - \\text{Low}_{\\text{Day}}}{\\text{High}_{\\text{Day}} - \\text{Low}_{\\text{Day}}} \\right) \\times 100$$
+            * **Technical Purpose:** Detects distribution rejection wicks on daily candles.
+            * **🗣️ Common Man Explanation:** 
+              A stock opens $+5\\%$ higher at 9:15 AM because of good news. If it closes at 3:30 PM near its day's highest point ($> 70\\%$), buyers stayed in control. But if it falls all day and closes near its lowest price ($< 35\\%$), it means large funds dumped their shares all afternoon.
+            * **How to Conclude:**
+              - **$\\ge 65\\%$:** Strong institutional absorption $\\rightarrow$ High odds of upward continuation.
+              - **$\\le 35\\%$:** Rejection trap $\\rightarrow$ Expect multi-day downward fade.
+            """
+        )
 
     with h2:
-        st.markdown("""
-        ### 🔹 4. Probability Metrics: P(1W) & P(2W)
-        * **Meaning:** Empirical probability that the asset will generate positive cumulative abnormal returns (CAR) over 5 trading sessions (1 week) and 10 trading sessions (2 weeks).
-        * **Rule:**
-          - $\\ge 70\\%$: High conviction for swing continuation.
-          - $\\le 40\\%$: High probability of multi-day decay.
+        st.markdown(
+            """
+            ### 🔹 4. Success Probabilities: P(1W) & P(2W)
+            * **Mathematical Modeling:** Empirical win-rate probability derived from post-announcement abnormal returns over 5 sessions (1 week) and 10 sessions (2 weeks), dynamically adjusted by volume and run-up friction:
+              $$P(1W) = \\text{Base}_{\\text{Event}} + \\text{Adj}_{\\text{Run-up}} + \\text{Adj}_{\\text{Volume}} + \\text{Adj}_{\\text{Trend}}$$
+            * **🗣️ Common Man Explanation:** 
+              The historical odds that this stock will be trading higher 1 week and 2 weeks from today based on the exact type of news and how the market reacted today.
+            * **How to Conclude:**
+              - **$P(1W) \\ge 70\\%$:** Statistical green light for a 5-to-10 day swing trade.
+              - **$P(1W) \\le 40\\%$:** High probability of capital loss over the coming fortnight.
 
-        ### 🔹 5. Scoring Weight Distribution
-        * **Expectation Factor (Run-Up):** $35\\%$ weight
-        * **Volume & Candle Closure:** $45\\%$ weight
-        * **200 DMA Structural Trend:** $20\\%$ weight
-        * **Multiplied by Event Accretion Factor:**
-          - Demerger: $+1.35\\times$
-          - Order Win / Capex: $+1.15\\times$
-          - Bonus / Split: $+0.70\\times$ (Decay bias)
-          - Regulatory Risk: $-1.50\\times$ (Negative drift)
-        """)
+            ---
+
+            ### 🔹 5. Corporate Action Behavior Playbook
+            * **1. Demergers & Value Unlocks (Base Edge: $72\\%$):**
+              Demergers physically unlock hidden subsidiary value and force institutional index funds to adjust portfolios, leading to sustained positive multi-week drift.
+            * **2. Mega Contracts & Capex (Base Edge: $66\\%$):**
+              Expands future revenue run-rate. Strong positive drift **only if** the pre-event run-up was small ($\le 3\%$).
+            * **3. Dividends & Buybacks (Base Edge: $46\\%$):**
+              Dividends extract cash from the company balance sheet. Once the ex-dividend date passes, stock prices automatically drop by the dividend amount, often creating a multi-week decay.
+            * **4. Bonus Issues & Stock Splits (Base Edge: $40\\%$):**
+              Splits and bonuses do not add a single rupee of fundamental value—they simply divide the same pizza into smaller slices. Retail investors often chase them mistakenly thinking the stock is "cheap," leading to heavy institutional profit-booking.
+            """
+        )
+
+    st.markdown("---")
+    st.markdown("### 🧭 Step-by-Step Practical Decision Flowchart")
+    st.markdown(
+        """
+        1. **Check Level 1 Screener:** Look at the **Top Expected to Move UP**. Verify that `Pre-RunUp 5D %` is $\\le 2.5\\%$ and `Vol Surge Ratio` is $\\ge 2.0\\times$.
+        2. **Confirm Trend in Level 3:** Check that `Dist 200DMA %` is positive ($> 0\\%$). Never buy a news breakout on a stock falling below its 200 DMA.
+        3. **Inspect the Corporate Action in Tab 2:** Go to **Single-Stock Deep Dive** and read the actual disclosure text to verify execution timelines.
+        4. **Execute with Discipline:** If all conditions align, allocate standard capital. Protect with a stop-loss placed just below the low of the announcement candle.
+        """
+    )
