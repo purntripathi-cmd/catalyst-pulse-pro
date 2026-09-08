@@ -215,7 +215,7 @@ RSS_FEEDS = {
 # =====================================================================
 # Section 2: Data Ingestion & Technical Math
 # =====================================================================
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=1800)
 def fetch_corporate_catalysts(active_universe):
     news_items, matched_map, ticker_news_history = [], {}, {}
     known_syms = [x["ticker"].replace(".NS", "") for x in active_universe]
@@ -257,7 +257,7 @@ def fetch_corporate_catalysts(active_universe):
 
     return news_items, matched_map, ticker_news_history
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def load_market_data(tickers):
     download_list = list(tickers) + ["^NSEI", "^INDIAVIX"]
     try:
@@ -491,6 +491,31 @@ vix_mood = "🟢 Stable & Calm" if curr_vix < 14 else ("🟡 Normal Volatility" 
 st.sidebar.markdown("---")
 st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
 st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
+
+# Top Header Bar with Manual Refresh
+h_col1, h_col2, h_col3 = st.columns([1.5, 1.2, 0.4])
+
+with h_col1:
+    st.markdown(
+        "### ⚡ Catalyst Pulse Pro <span style='font-size:0.85rem; color:#6c757d;'>| NIFTY 100 Corporate Action Radar</span>",
+        unsafe_allow_html=True
+    )
+
+with h_col2:
+    st.markdown(
+        f"""
+        <div style='text-align: right; padding-top: 6px; font-size: 0.85rem;'>
+            <b>Market Mood:</b> {vix_mood} (VIX: {curr_vix:.1f}) &nbsp;|&nbsp; 
+            <span style='color: #28a745; font-weight: 600;'>BSE / Reg 30 Live</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+with h_col3:
+    if st.button("🔄 Refresh", use_container_width=True, help="Purge cache and pull latest live data"):
+        st.cache_data.clear()
+        st.rerun()
 
 # Top Header Bar utilizing right-hand space
 h_col1, h_col2 = st.columns([1.6, 1.4])
