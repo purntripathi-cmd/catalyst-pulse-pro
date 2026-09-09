@@ -364,9 +364,11 @@ def log_daily_predictions_to_github(candidates_df):
         return len(new_records) if success else 0
     return 0
 
+
+
 def audit_and_update_outcomes(raw_data):
     ledger, sha = get_github_ledger()
-    if ledger.empty:
+    if ledger.empty or raw_data.empty:
         return ledger
 
     changed = False
@@ -374,37 +376,51 @@ def audit_and_update_outcomes(raw_data):
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
             continue
 
-        sym = f"{row['Ticker']}.NS"
-        if sym in raw_data.columns.levels[0]:
-            hist = raw_data[sym]["Close"].dropna()
-            pred_date = pd.to_datetime(row["Date"])
-            post_data = hist[hist.index >= pred_date]
+        ticker_sym = str(row["Ticker"]).replace(".NS", "")
+        ns_sym = f"{ticker_sym}.NS"
 
-            if len(post_data) > 1:
-                curr_p = float(post_data.iloc[-1])
+        # Check column existence in multi-index columns
+        target_col = None
+        if hasattr(raw_data, "columns") and hasattr(raw_data.columns, "levels"):
+            if ns_sym in raw_data.columns.levels[0]:
+                target_col = ns_sym
+            elif ticker_sym in raw_data.columns.levels[0]:
+                target_col = ticker_sym
+
+        if target_col:
+            hist = raw_data[target_col]["Close"].dropna()
+            if not hist.empty:
+                curr_p = float(hist.iloc[-1])
                 init_p = float(row["CMP_At_Prediction"])
                 ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
-                days = len(post_data) - 1
 
+                pred_date = pd.to_datetime(row["Date"])
+                post_data = hist[hist.index >= pred_date]
+                days = max(0, len(post_data) - 1)
+
+                # Always update the live CMP, Days, and Realized Return
                 ledger.at[idx, "Current_CMP"] = curr_p
                 ledger.at[idx, "Realized_Return_Pct"] = ret_pct
                 ledger.at[idx, "Days_Elapsed"] = days
                 changed = True
 
-                if row["Predicted_Outlook"] == "BULLISH":
-                    if ret_pct >= row["Target_Return_Pct"]:
-                        ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                    elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
-                        ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
-                else:
-                    if ret_pct <= row["Target_Return_Pct"]:
-                        ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                    elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
-                        ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct < 0 else "FAILED"
+                # Horizon evaluation criteria (5 to 10 sessions)
+                if days >= 1:
+                    if row["Predicted_Outlook"] == "BULLISH":
+                        if ret_pct >= row["Target_Return_Pct"]:
+                            ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                        elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
+                            ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                    else:  # BEARISH_FADE
+                        if ret_pct <= row["Target_Return_Pct"]:
+                            ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                        elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
+                            ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct < 0 else "FAILED"
 
     if changed:
         commit_github_ledger(ledger, sha)
     return ledger
+
 
 def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
     if raw_data.empty:
