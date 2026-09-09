@@ -25,7 +25,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install pandas yfinance requests
+        run: pip install pandas yfinance requests feedparser
 
       - name: Run Audit Daemon
         run: python audit_daemon.py
