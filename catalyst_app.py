@@ -286,9 +286,9 @@ def get_github_ledger():
     
     empty_df = pd.DataFrame(columns=[
         "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
-        "Predicted_Outlook", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
-        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status",
-        "Recommended_Action", "Holding_Horizon"
+        "Predicted_Outlook", "Recommended_Action", "Holding_Horizon", "Target_Days",
+        "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
+        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
     ])
     
     if not token or not repo:
@@ -350,6 +350,9 @@ def log_daily_predictions_to_github(candidates_df):
         is_bullish = "Bullish" in str(row.get("1-2W Outlook", ""))
         action_rec = "🟢 BUY / ACCUMULATE" if is_bullish else "🔴 SHORT / FADE (SELL)"
         
+        horizon_val = str(row.get("Dynamic Horizon", "🎯 Tactical Swing (1-2 Weeks)"))
+        target_days_val = int(row.get("Target Days", 8))
+        
         new_records.append({
             "Prediction_ID": p_id,
             "Date": timestamp_str,
@@ -358,7 +361,8 @@ def log_daily_predictions_to_github(candidates_df):
             "CMP_At_Prediction": row["CMP (₹)"],
             "Predicted_Outlook": "BULLISH" if is_bullish else "BEARISH_FADE",
             "Recommended_Action": action_rec,
-            "Holding_Horizon": "1-2 Weeks (5-10 Sessions)",
+            "Holding_Horizon": horizon_val,
+            "Target_Days": target_days_val,
             "Confidence": row.get("Confidence", "High"),
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
             "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
@@ -381,13 +385,17 @@ def audit_and_update_outcomes(raw_data):
 
     changed = False
     for idx, row in ledger.iterrows():
-        # Ensure direction columns are populated if missing in older CSV rows
         pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
+        
+        # Populate legacy records if missing
         if "Recommended_Action" not in ledger.columns or pd.isna(ledger.at[idx, "Recommended_Action"]):
             ledger.at[idx, "Recommended_Action"] = "🟢 BUY / ACCUMULATE" if "BULLISH" in pred_type else "🔴 SHORT / FADE (SELL)"
             changed = True
         if "Holding_Horizon" not in ledger.columns or pd.isna(ledger.at[idx, "Holding_Horizon"]):
-            ledger.at[idx, "Holding_Horizon"] = "1-2 Weeks (5-10 Sessions)"
+            ledger.at[idx, "Holding_Horizon"] = "🎯 Tactical Swing (1-2 Weeks)"
+            changed = True
+        if "Target_Days" not in ledger.columns or pd.isna(ledger.at[idx, "Target_Days"]):
+            ledger.at[idx, "Target_Days"] = 8
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -409,7 +417,7 @@ def audit_and_update_outcomes(raw_data):
                 curr_p = float(hist.iloc[-1])
                 init_p = float(row["CMP_At_Prediction"])
                 
-                # Directional PnL: In a BEARISH_FADE / Sell setup, price falling yields positive return
+                # Direction-Aware Return: In a SHORT / BEARISH_FADE setup, price dropping yields positive return
                 is_bullish = ("BULLISH" in pred_type)
                 if is_bullish:
                     ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
@@ -426,19 +434,22 @@ def audit_and_update_outcomes(raw_data):
                 ledger.at[idx, "Days_Elapsed"] = days
                 changed = True
 
+                # Dynamic Horizon-based resolution
+                target_days = int(row.get("Target_Days", 8))
+                max_allowed_days = target_days + 2
+
                 if days >= 1:
                     if is_bullish:
                         if ret_pct >= row["Target_Return_Pct"]:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                        elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
+                        elif ret_pct <= row["Stop_Loss_Pct"] or days >= max_allowed_days:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
                     else:
-                        # For short setups, positive directional return means successful breakdown
                         target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
                         stop_loss_hit = ret_pct <= -abs(float(row.get("Stop_Loss_Pct", 2.5)))
                         if ret_pct >= target_gain:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                        elif stop_loss_hit or days >= 10:
+                        elif stop_loss_hit or days >= max_allowed_days:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
 
     if changed:
@@ -528,6 +539,18 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         else:
             outlook = "🟡 Neutral Consolidation"
 
+        # Dynamic Empirical Holding Horizon Derivation
+        abs_target = 4.5 if "Bullish" in outlook else 4.0
+        drift_velocity = 1.0 + (vol_surge_ratio * 0.25) if prob_1w >= 65 else 0.65
+        estimated_days = int(np.clip(round(abs_target / drift_velocity), 3, 15))
+
+        if estimated_days <= 5:
+            horizon_label = f"⚡ Fast Drift ({estimated_days} Sessions)"
+        elif estimated_days <= 10:
+            horizon_label = f"🎯 Tactical Swing ({estimated_days} Sessions)"
+        else:
+            horizon_label = f"⏳ Positional Unlock ({estimated_days} Sessions)"
+
         results.append({
             "Ticker": clean_sym,
             "Name": asset["name"],
@@ -543,6 +566,8 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
             "Active Catalyst": cat_name,
             "Catalyst Group": cat_group,
             "1-2W Outlook": outlook,
+            "Dynamic Horizon": horizon_label,
+            "Target Days": estimated_days
         })
 
     return pd.DataFrame(results)
@@ -902,7 +927,7 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
 # VIEW 5: Prediction Audit & Win Rate Ledger (GitHub Backed)
 elif nav_choice == "📊 Prediction Audit & Win Rate":
     st.subheader("📊 Self-Auditing Prediction Ledger & Success Rate")
-    st.caption("Auto-synced to GitHub Repository. Directional PnL, holding horizons, and risk-adjusted metrics.")
+    st.caption("Auto-synced to GitHub Repository. Dynamic horizons, directional PnL, and institutional performance metrics.")
 
     audited_ledger = audit_and_update_outcomes(raw_market_data)
 
@@ -940,16 +965,16 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         if "Date" in display_ledger.columns:
             display_ledger["Date"] = display_ledger["Date"].apply(format_ledger_ist_date)
 
-        # Tranche budget modeling for monetary calculations (₹15,000 standard setup size)
+        # Standard allocation per audited setup (₹15,000)
         ASSUMED_TRANCHE_BUDGET = 15000.0
 
-        # Backfill direction and recommended action if missing
+        # Dynamic backfill of direction and holding horizon for existing CSV rows
         if "Recommended_Action" not in display_ledger.columns:
             display_ledger["Recommended_Action"] = display_ledger["Predicted_Outlook"].apply(
                 lambda x: "🟢 BUY / ACCUMULATE" if "BULLISH" in str(x).upper() else "🔴 SHORT / FADE (SELL)"
             )
         if "Holding_Horizon" not in display_ledger.columns:
-            display_ledger["Holding_Horizon"] = "1-2 Weeks (5-10 Sessions)"
+            display_ledger["Holding_Horizon"] = "🎯 Tactical Swing (1-2 Weeks)"
 
         # Calculate monetary PnL for each individual row based on directional return
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
@@ -1072,7 +1097,6 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
             "Active_Catalyst", "CMP_At_Prediction", "Current_CMP", "Live PnL (₹)", "Live PnL %",
             "Confidence", "Days_Elapsed", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
-        # Keep only available columns
         existing_cols = [c for c in cols_display if c in filtered_ledger.columns]
 
         st.dataframe(
