@@ -287,7 +287,7 @@ def get_github_ledger():
     empty_df = pd.DataFrame(columns=[
         "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
         "Predicted_Outlook", "Recommended_Action", "Holding_Horizon", "Target_Days",
-        "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
+        "Trigger_Type", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
         "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
     ])
     
@@ -326,7 +326,7 @@ def commit_github_ledger(updated_df, sha=None):
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     
     payload = {
-        "message": f"Auto-audit: Update prediction ledger [{datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}]",
+        "message": f"Ledger update [{datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}]",
         "content": b64_content
     }
     if sha:
@@ -335,7 +335,7 @@ def commit_github_ledger(updated_df, sha=None):
     res = requests.put(url, headers=headers, data=json.dumps(payload))
     return res.status_code in [200, 201]
 
-def log_daily_predictions_to_github(candidates_df):
+def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI"):
     ledger, sha = get_github_ledger()
     now_ist = datetime.datetime.now(IST)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -363,6 +363,7 @@ def log_daily_predictions_to_github(candidates_df):
             "Recommended_Action": action_rec,
             "Holding_Horizon": horizon_val,
             "Target_Days": target_days_val,
+            "Trigger_Type": trigger_type,
             "Confidence": row.get("Confidence", "High"),
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
             "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
@@ -396,6 +397,9 @@ def audit_and_update_outcomes(raw_data):
             changed = True
         if "Target_Days" not in ledger.columns or pd.isna(ledger.at[idx, "Target_Days"]):
             ledger.at[idx, "Target_Days"] = 8
+            changed = True
+        if "Trigger_Type" not in ledger.columns or pd.isna(ledger.at[idx, "Trigger_Type"]):
+            ledger.at[idx, "Trigger_Type"] = "SCHEDULED_CRON_AUTO"
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -434,7 +438,6 @@ def audit_and_update_outcomes(raw_data):
                 ledger.at[idx, "Days_Elapsed"] = days
                 changed = True
 
-                # Dynamic Horizon-based resolution
                 target_days = int(row.get("Target_Days", 8))
                 max_allowed_days = target_days + 2
 
@@ -476,20 +479,16 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
         dist_200 = ((cmp - d200) / d200) * 100.0
 
-        # Pre-Event Run-up (5D Lookback)
         price_5d_ago = float(c.iloc[-6]) if len(c) >= 6 else float(c.iloc[0])
         runup_5d = ((cmp - price_5d_ago) / price_5d_ago) * 100.0
 
-        # Volume Surge Ratio
         v_latest = float(v.iloc[-1])
         v_20d = float(v.rolling(20).mean().iloc[-1])
         vol_surge_ratio = round(v_latest / v_20d, 2) if v_20d > 0 else 1.0
 
-        # Intraday Close in Range %
         day_range = float(h.iloc[-1] - l.iloc[-1])
         close_pos_pct = round(((cmp - float(l.iloc[-1])) / day_range) * 100.0, 1) if day_range > 0 else 50.0
 
-        # News Matching
         cat_info = news_map.get(clean_sym, None)
         if cat_info:
             cat_name = cat_info["catalyst"]
@@ -504,7 +503,6 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
             base_p1 = 50
             base_p2 = 50
 
-        # Scoring Pillars
         score_runup = np.clip(100.0 - (runup_5d * 10.0), -50.0, 50.0)
         score_volume = (vol_surge_ratio * (close_pos_pct - 50.0) * 0.4)
         score_trend = 15.0 if dist_200 > 0 else -15.0
@@ -512,7 +510,6 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         raw_score = (score_runup * 0.35) + (score_volume * 0.45) + (score_trend * 0.20)
         final_catalyst_score = round(raw_score * impact_mult, 1)
 
-        # Empirical Probability Adjustment
         prob_adjustment = 0.0
         if runup_5d <= 2.5:
             prob_adjustment += 8.0
@@ -539,7 +536,6 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         else:
             outlook = "🟡 Neutral Consolidation"
 
-        # Dynamic Empirical Holding Horizon Derivation
         abs_target = 4.5 if "Bullish" in outlook else 4.0
         drift_velocity = 1.0 + (vol_surge_ratio * 0.25) if prob_1w >= 65 else 0.65
         estimated_days = int(np.clip(round(abs_target / drift_velocity), 3, 15))
@@ -611,7 +607,7 @@ NAV_TABS = [
     "🎯 Dynamic 1-2 Week Screener",
     "🔬 Single-Stock Deep Dive",
     "📰 Exchange Disclosures & Media Feed",
-    "📊 Prediction Audit & Win Rate",
+    "📊 Paper Prediction Audit & Win Rate",
     "📖 Quantitative Strategy Handbook"
 ]
 
@@ -924,29 +920,50 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
         """
     )
 
-# VIEW 5: Prediction Audit & Win Rate Ledger (GitHub Backed)
-elif nav_choice == "📊 Prediction Audit & Win Rate":
-    st.subheader("📊 Self-Auditing Prediction Ledger & Success Rate")
-    st.caption("Auto-synced to GitHub Repository. Dynamic horizons, directional PnL, and institutional performance metrics.")
+# VIEW 5: Paper Prediction Audit & Win Rate Ledger (GitHub Backed)
+elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
+    st.subheader("📊 Self-Auditing Paper Prediction Ledger & Win Rate")
+    st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps, directional PnL, dynamic horizons & test run management.")
 
     audited_ledger = audit_and_update_outcomes(raw_market_data)
 
-    col_btn1, col_btn2 = st.columns([1, 3])
+    col_btn1, col_btn2 = st.columns([1.2, 3])
     with col_btn1:
-        if st.button("📥 Record Today's Top Predictions", use_container_width=True):
+        if st.button("📥 Record Today's Top Predictions (Manual Trigger)", use_container_width=True):
             top_setups = pd.concat([
                 catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].head(3),
                 catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].head(3)
             ])
-            added = log_daily_predictions_to_github(top_setups)
+            added = log_daily_predictions_to_github(top_setups, trigger_type="MANUAL_WEB_UI")
             if added > 0:
-                st.success(f"✅ Committed {added} new predictions to GitHub repository ledger (IST)!")
+                st.success(f"✅ Recorded {added} new predictions via Manual Trigger (IST)!")
                 st.rerun()
             else:
                 st.info("Today's setups are already recorded in the ledger.")
 
+    # Collapsible Test Run Deletion & Ledger Clean-up Tool
+    with st.expander("🛠️ Manage & Delete Test Runs / Selected Entries", expanded=False):
+        st.caption("Select specific test predictions to permanently purge from the GitHub repository ledger.")
+        if not audited_ledger.empty and "Prediction_ID" in audited_ledger.columns:
+            preds_to_delete = st.multiselect(
+                "Select Prediction IDs to Delete:",
+                options=audited_ledger["Prediction_ID"].tolist()
+            )
+            del_c1, del_c2 = st.columns([1, 4])
+            with del_c1:
+                if st.button("🗑️ Delete Selected", type="primary", use_container_width=True):
+                    if preds_to_delete:
+                        cleaned_df = audited_ledger[~audited_ledger["Prediction_ID"].isin(preds_to_delete)].copy()
+                        _, sha = get_github_ledger()
+                        if commit_github_ledger(cleaned_df, sha):
+                            st.success(f"Purged {len(preds_to_delete)} records permanently from GitHub ledger.")
+                            st.rerun()
+                        else:
+                            st.error("Failed to commit ledger changes to GitHub.")
+                    else:
+                        st.warning("Please select at least one record to delete.")
+
     if not audited_ledger.empty:
-        # Normalize Date column to clean IST representation for display
         def format_ledger_ist_date(d_val):
             if pd.isna(d_val) or str(d_val).strip() == "":
                 return "Pending"
@@ -965,18 +982,17 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         if "Date" in display_ledger.columns:
             display_ledger["Date"] = display_ledger["Date"].apply(format_ledger_ist_date)
 
-        # Standard allocation per audited setup (₹15,000)
         ASSUMED_TRANCHE_BUDGET = 15000.0
 
-        # Dynamic backfill of direction and holding horizon for existing CSV rows
         if "Recommended_Action" not in display_ledger.columns:
             display_ledger["Recommended_Action"] = display_ledger["Predicted_Outlook"].apply(
                 lambda x: "🟢 BUY / ACCUMULATE" if "BULLISH" in str(x).upper() else "🔴 SHORT / FADE (SELL)"
             )
         if "Holding_Horizon" not in display_ledger.columns:
             display_ledger["Holding_Horizon"] = "🎯 Tactical Swing (1-2 Weeks)"
+        if "Trigger_Type" not in display_ledger.columns:
+            display_ledger["Trigger_Type"] = "MANUAL_WEB_UI"
 
-        # Calculate monetary PnL for each individual row based on directional return
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
         display_ledger["Live PnL %"] = display_ledger["Clean_Ret_Pct"]
@@ -984,20 +1000,17 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         closed = display_ledger[display_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])].copy()
         pending = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
 
-        # Closed trade metrics
         total_closed = len(closed)
         successes = len(closed[closed["Outcome_Status"] == "SUCCESS"])
         win_rate = round((successes / total_closed * 100.0), 1) if total_closed > 0 else 0.0
         closed_realized_pnl_rs = float(closed["Live PnL (₹)"].sum())
         avg_closed_ret = round(float(closed["Clean_Ret_Pct"].mean()), 2) if total_closed > 0 else 0.0
 
-        # Pending live unrealized metrics
         active_pending_count = len(pending)
         active_capital_deployed = active_pending_count * ASSUMED_TRANCHE_BUDGET
         live_unrealized_pnl_rs = float(pending["Live PnL (₹)"].sum())
         live_unrealized_pct = (live_unrealized_pnl_rs / active_capital_deployed * 100.0) if active_capital_deployed > 0 else 0.0
 
-        # Benchmark Alpha calculation (vs NIFTY 50)
         nifty_period_ret = 0.0
         if not raw_market_data.empty and "^NSEI" in raw_market_data.columns.levels[0]:
             n_series = raw_market_data["^NSEI"]["Close"].dropna()
@@ -1008,7 +1021,6 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         effective_return_pct = avg_closed_ret if total_closed > 0 else live_unrealized_pct
         alpha_vs_nifty = effective_return_pct - nifty_period_ret
 
-        # Risk metrics (Sharpe & Sortino)
         eval_daily_returns = (closed["Clean_Ret_Pct"] / 100.0) if not closed.empty else (display_ledger["Clean_Ret_Pct"] / 100.0)
         rf_daily = 0.065 / 252.0
         excess_ret = eval_daily_returns - rf_daily
@@ -1051,11 +1063,13 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
 
         # --- Interactive Controls Matching Tactical Allocator Pro ---
-        f1, f2 = st.columns([1, 1])
+        f1, f2, f3 = st.columns([1, 1, 1])
         with f1:
             outlook_f = st.selectbox("Filter Outlook / Setup:", ["All Outlooks Combined", "BULLISH (Buy) Only", "BEARISH_FADE (Short) Only"], index=0)
         with f2:
             status_f = st.selectbox("Filter Horizon / Status:", ["All Combined", "PENDING (Open) Only", "Completed (SUCCESS/FAILED) Only"], index=0)
+        with f3:
+            trig_f = st.selectbox("Filter Trigger Origin:", ["All Triggers", "MANUAL_WEB_UI Only", "SCHEDULED_CRON_AUTO Only"], index=0)
 
         filtered_ledger = display_ledger.copy()
         if "BULLISH" in outlook_f:
@@ -1067,6 +1081,11 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
             filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"] == "PENDING"]
         elif "Completed" in status_f:
             filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
+
+        if "MANUAL" in trig_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Trigger_Type"] == "MANUAL_WEB_UI"]
+        elif "SCHEDULED" in trig_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Trigger_Type"] == "SCHEDULED_CRON_AUTO"]
 
         st.markdown("##### 📑 Ledger Audit Trail (IST Real-Time Sync)")
 
@@ -1090,10 +1109,14 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
                 styles["Recommended_Action"] = df["Recommended_Action"].apply(
                     lambda v: "color: #155724; font-weight: bold;" if "BUY" in str(v) else "color: #721c24; font-weight: bold;"
                 )
+            if "Trigger_Type" in df.columns:
+                styles["Trigger_Type"] = df["Trigger_Type"].apply(
+                    lambda v: "background-color: #e3f2fd; color: #0d47a1; font-weight: 600;" if "MANUAL" in str(v) else "background-color: #f3e5f5; color: #4a148c;"
+                )
             return styles
 
         cols_display = [
-            "Prediction_ID", "Date", "Ticker", "Recommended_Action", "Holding_Horizon",
+            "Prediction_ID", "Date", "Ticker", "Trigger_Type", "Recommended_Action", "Holding_Horizon",
             "Active_Catalyst", "CMP_At_Prediction", "Current_CMP", "Live PnL (₹)", "Live PnL %",
             "Confidence", "Days_Elapsed", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
