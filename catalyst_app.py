@@ -540,7 +540,9 @@ st.sidebar.markdown("---")
 st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
 st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
 
-# Navigation State Persistence (Prevents tab reset on refresh)
+# =====================================================================
+# Navigation State Persistence (URL + Session State Lock)
+# =====================================================================
 NAV_TABS = [
     "🎯 Dynamic 1-2 Week Screener",
     "🔬 Single-Stock Deep Dive",
@@ -549,10 +551,17 @@ NAV_TABS = [
     "📖 Quantitative Strategy Handbook"
 ]
 
-if "active_nav_tab" not in st.session_state or st.session_state["active_nav_tab"] not in NAV_TABS:
+# 1. Read tab from URL query params (failsafe for iframes & hard reruns)
+url_tab = st.query_params.get("tab", None)
+if url_tab in NAV_TABS:
+    st.session_state["active_nav_tab"] = url_tab
+elif "active_nav_tab" not in st.session_state or st.session_state["active_nav_tab"] not in NAV_TABS:
     st.session_state["active_nav_tab"] = NAV_TABS[0]
 
-# Top Header Bar with In-App Cache Purge & Rerun
+# Calculate explicit index so it NEVER defaults to 0
+current_tab_index = NAV_TABS.index(st.session_state["active_nav_tab"])
+
+# Top Header Bar with Refresh
 h_col1, h_col2, h_col3 = st.columns([1.5, 1.2, 0.4])
 
 with h_col1:
@@ -574,38 +583,28 @@ with h_col2:
 
 with h_col3:
     if st.button("🔄 Refresh", use_container_width=True, help="Purge internal data cache and reload without tab reset"):
+        # Explicitly preserve the current tab before clearing cache
+        saved_active = st.session_state.get("active_nav_tab", NAV_TABS[0])
         st.cache_data.clear()
+        st.session_state["active_nav_tab"] = saved_active
+        st.query_params["tab"] = saved_active
         st.rerun()
 
-# Persistent radio navigation bound to key
+# 2. Callback function when tab changes manually
+def on_tab_change():
+    st.query_params["tab"] = st.session_state["active_nav_tab"]
+
 nav_choice = st.radio(
     "Navigation",
     options=NAV_TABS,
+    index=current_tab_index,
     key="active_nav_tab",
+    on_change=on_tab_change,
     label_visibility="collapsed",
     horizontal=True
 )
 
 st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
-
-# Helper function for relative Top 3 / Bottom 3 color-coding
-def apply_top3_bot3_styling(df):
-    styles = pd.DataFrame("", index=df.index, columns=df.columns)
-    higher_is_better = ["Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %"]
-    for col in higher_is_better:
-        if col in df.columns:
-            t3 = df[col].nlargest(3).index
-            b3 = df[col].nsmallest(3).index
-            styles.loc[t3, col] = "background-color: #d4edda; color: #155724; font-weight: bold;"
-            styles.loc[b3, col] = "background-color: #f8d7da; color: #721c24; font-weight: bold;"
-
-    if "Pre-RunUp 5D %" in df.columns:
-        best_runup = df["Pre-RunUp 5D %"].nsmallest(3).index
-        worst_runup = df["Pre-RunUp 5D %"].nlargest(3).index
-        styles.loc[best_runup, "Pre-RunUp 5D %"] = "background-color: #d4edda; color: #155724; font-weight: bold;"
-        styles.loc[worst_runup, "Pre-RunUp 5D %"] = "background-color: #f8d7da; color: #721c24; font-weight: bold;"
-
-    return styles
 
 # =====================================================================
 # Section 5: Views
