@@ -287,7 +287,7 @@ def get_github_ledger():
     empty_df = pd.DataFrame(columns=[
         "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
         "Predicted_Outlook", "Recommended_Action", "Holding_Horizon", "Target_Days",
-        "Trigger_Type", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
+        "Market_Regime", "Trigger_Type", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
         "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
     ])
     
@@ -335,7 +335,7 @@ def commit_github_ledger(updated_df, sha=None):
     res = requests.put(url, headers=headers, data=json.dumps(payload))
     return res.status_code in [200, 201]
 
-def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI"):
+def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI", current_regime_label="🟡 Sideways"):
     ledger, sha = get_github_ledger()
     now_ist = datetime.datetime.now(IST)
     today_str = now_ist.strftime("%Y-%m-%d")
@@ -363,6 +363,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI")
             "Recommended_Action": action_rec,
             "Holding_Horizon": horizon_val,
             "Target_Days": target_days_val,
+            "Market_Regime": current_regime_label,
             "Trigger_Type": trigger_type,
             "Confidence": row.get("Confidence", "High"),
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
@@ -400,6 +401,9 @@ def audit_and_update_outcomes(raw_data):
             changed = True
         if "Trigger_Type" not in ledger.columns or pd.isna(ledger.at[idx, "Trigger_Type"]):
             ledger.at[idx, "Trigger_Type"] = "SCHEDULED_CRON_AUTO"
+            changed = True
+        if "Market_Regime" not in ledger.columns or pd.isna(ledger.at[idx, "Market_Regime"]):
+            ledger.at[idx, "Market_Regime"] = "🟡 Sideways / Rangebound"
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -596,8 +600,26 @@ if "^INDIAVIX" in raw_market_data.columns.levels[0]:
 
 vix_mood = "🟢 Stable & Calm" if curr_vix < 14 else ("🟡 Normal Volatility" if curr_vix <= 21 else "⚠️ High Panic / Wild Swings")
 
+# Macro Market Regime Calculation based on NIFTY 50 Trend
+nifty_regime = "🟡 Sideways / Rangebound"
+if "^NSEI" in raw_market_data.columns.levels[0]:
+    n_df = raw_market_data["^NSEI"]["Close"].dropna()
+    if len(n_df) >= 200:
+        n_cmp = float(n_df.iloc[-1])
+        n_d50 = float(n_df.rolling(50).mean().iloc[-1])
+        n_d200 = float(n_df.rolling(200).mean().iloc[-1])
+        if n_cmp > n_d50 > n_d200:
+            nifty_regime = "🟢 Strong Bull"
+        elif n_cmp < n_d50 < n_d200:
+            nifty_regime = "🔴 Bear Market / Correction"
+        else:
+            nifty_regime = "🟡 Sideways / Rangebound"
+
+regime_tag_full = f"{nifty_regime} (VIX: {curr_vix:.1f})"
+
 st.sidebar.markdown("---")
 st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
+st.sidebar.caption(f"Market Regime: {nifty_regime}")
 st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
 
 # =====================================================================
@@ -624,7 +646,7 @@ h_col1, h_col2, h_col3 = st.columns([1.5, 1.2, 0.4])
 
 with h_col1:
     st.markdown(
-        "### ⚡ Catalyst Pulse Pro <span style='font-size:0.85rem; color:#6c757d;'>| NIFTY 100 Corporate Action Radar</span>",
+        f"### ⚡ Catalyst Pulse Pro <span style='font-size:0.85rem; color:#6c757d;'>| Regime: {nifty_regime}</span>",
         unsafe_allow_html=True
     )
 
@@ -923,7 +945,7 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
 # VIEW 5: Paper Prediction Audit & Win Rate Ledger (GitHub Backed)
 elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
     st.subheader("📊 Self-Auditing Paper Prediction Ledger & Win Rate")
-    st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps, directional PnL, dynamic horizons & test run management.")
+    st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps, directional PnL, dynamic horizons, market regime tracking & test run management.")
 
     audited_ledger = audit_and_update_outcomes(raw_market_data)
 
@@ -934,9 +956,9 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].head(3),
                 catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].head(3)
             ])
-            added = log_daily_predictions_to_github(top_setups, trigger_type="MANUAL_WEB_UI")
+            added = log_daily_predictions_to_github(top_setups, trigger_type="MANUAL_WEB_UI", current_regime_label=regime_tag_full)
             if added > 0:
-                st.success(f"✅ Recorded {added} new predictions via Manual Trigger (IST)!")
+                st.success(f"✅ Recorded {added} new predictions under {nifty_regime} (IST)!")
                 st.rerun()
             else:
                 st.info("Today's setups are already recorded in the ledger.")
@@ -992,6 +1014,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             display_ledger["Holding_Horizon"] = "🎯 Tactical Swing (1-2 Weeks)"
         if "Trigger_Type" not in display_ledger.columns:
             display_ledger["Trigger_Type"] = "MANUAL_WEB_UI"
+        if "Market_Regime" not in display_ledger.columns:
+            display_ledger["Market_Regime"] = "🟡 Sideways / Rangebound"
 
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
@@ -1063,13 +1087,15 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
 
         # --- Interactive Controls Matching Tactical Allocator Pro ---
-        f1, f2, f3 = st.columns([1, 1, 1])
+        f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
         with f1:
             outlook_f = st.selectbox("Filter Outlook / Setup:", ["All Outlooks Combined", "BULLISH (Buy) Only", "BEARISH_FADE (Short) Only"], index=0)
         with f2:
             status_f = st.selectbox("Filter Horizon / Status:", ["All Combined", "PENDING (Open) Only", "Completed (SUCCESS/FAILED) Only"], index=0)
         with f3:
             trig_f = st.selectbox("Filter Trigger Origin:", ["All Triggers", "MANUAL_WEB_UI Only", "SCHEDULED_CRON_AUTO Only"], index=0)
+        with f4:
+            regime_f = st.selectbox("Filter Market Regime:", ["All Regimes Combined", "Bull Market Only", "Bear Market Only", "Sideways / Rangebound Only"], index=0)
 
         filtered_ledger = display_ledger.copy()
         if "BULLISH" in outlook_f:
@@ -1086,6 +1112,13 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             filtered_ledger = filtered_ledger[filtered_ledger["Trigger_Type"] == "MANUAL_WEB_UI"]
         elif "SCHEDULED" in trig_f:
             filtered_ledger = filtered_ledger[filtered_ledger["Trigger_Type"] == "SCHEDULED_CRON_AUTO"]
+
+        if "Bull" in regime_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Market_Regime"].str.contains("Bull", na=False)]
+        elif "Bear" in regime_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Market_Regime"].str.contains("Bear", na=False)]
+        elif "Sideways" in regime_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Market_Regime"].str.contains("Sideways|Range", na=False)]
 
         st.markdown("##### 📑 Ledger Audit Trail (IST Real-Time Sync)")
 
@@ -1113,10 +1146,16 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 styles["Trigger_Type"] = df["Trigger_Type"].apply(
                     lambda v: "background-color: #e3f2fd; color: #0d47a1; font-weight: 600;" if "MANUAL" in str(v) else "background-color: #f3e5f5; color: #4a148c;"
                 )
+            if "Market_Regime" in df.columns:
+                styles["Market_Regime"] = df["Market_Regime"].apply(
+                    lambda v: "background-color: #d4edda; color: #155724; font-weight: 600;" if "Bull" in str(v)
+                    else ("background-color: #f8d7da; color: #721c24; font-weight: 600;" if "Bear" in str(v)
+                    else "background-color: #fff3cd; color: #856404;")
+                )
             return styles
 
         cols_display = [
-            "Prediction_ID", "Date", "Ticker", "Trigger_Type", "Recommended_Action", "Holding_Horizon",
+            "Prediction_ID", "Date", "Ticker", "Trigger_Type", "Market_Regime", "Recommended_Action", "Holding_Horizon",
             "Active_Catalyst", "CMP_At_Prediction", "Current_CMP", "Live PnL (₹)", "Live PnL %",
             "Confidence", "Days_Elapsed", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
