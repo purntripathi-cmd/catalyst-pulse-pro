@@ -20,13 +20,13 @@ logger = logging.getLogger("CatalystPulsePro")
 
 st.set_page_config(page_title="Catalyst Pulse Pro | NIFTY 100 Event Alpha", page_icon="⚡", layout="wide")
 
-# High-density, space-optimized styling
+# High-density, space-optimized styling with extra bottom scroll padding
 st.markdown(
     """
     <style>
         .block-container {
             padding-top: 0.5rem !important;
-            padding-bottom: 1.5rem !important;
+            padding-bottom: 6.0rem !important;
             padding-left: 1.0rem !important;
             padding-right: 1.0rem !important;
         }
@@ -44,16 +44,16 @@ st.markdown(
             padding-right: 0.8rem !important;
         }
         
-        /* Typography & density */
+        /* Compact Typography & Density */
         html, body, [class*="css"] {
             font-size: 0.86rem !important;
         }
         div[data-testid="stMetricValue"] {
-            font-size: 1.18rem !important;
+            font-size: 1.08rem !important;
             font-weight: 700 !important;
         }
         div[data-testid="stMetricLabel"] {
-            font-size: 0.75rem !important;
+            font-size: 0.72rem !important;
         }
         
         /* Compact Segmented Pills */
@@ -67,9 +67,12 @@ st.markdown(
             background-color: #1E88E5 !important; color: #ffffff !important; box-shadow: 0 1px 4px rgba(30, 136, 229, 0.3);
         }
         
-        /* Pulse Banner */
-        .sentiment-card {
-            background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 6px 12px; margin-bottom: 0.5rem;
+        /* Compact Metrics container */
+        div[data-testid="stMetric"] {
+            background-color: #fcfcfc;
+            border: 1px solid #edf0f2;
+            border-radius: 6px;
+            padding: 5px 8px !important;
         }
     </style>
     """,
@@ -284,7 +287,8 @@ def get_github_ledger():
     empty_df = pd.DataFrame(columns=[
         "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
         "Predicted_Outlook", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
-        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
+        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status",
+        "Recommended_Action", "Holding_Horizon"
     ])
     
     if not token or not repo:
@@ -344,6 +348,8 @@ def log_daily_predictions_to_github(candidates_df):
             continue
             
         is_bullish = "Bullish" in str(row.get("1-2W Outlook", ""))
+        action_rec = "🟢 BUY / ACCUMULATE" if is_bullish else "🔴 SHORT / FADE (SELL)"
+        
         new_records.append({
             "Prediction_ID": p_id,
             "Date": timestamp_str,
@@ -351,6 +357,8 @@ def log_daily_predictions_to_github(candidates_df):
             "Active_Catalyst": row["Active Catalyst"],
             "CMP_At_Prediction": row["CMP (₹)"],
             "Predicted_Outlook": "BULLISH" if is_bullish else "BEARISH_FADE",
+            "Recommended_Action": action_rec,
+            "Holding_Horizon": "1-2 Weeks (5-10 Sessions)",
             "Confidence": row.get("Confidence", "High"),
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
             "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
@@ -373,6 +381,15 @@ def audit_and_update_outcomes(raw_data):
 
     changed = False
     for idx, row in ledger.iterrows():
+        # Ensure direction columns are populated if missing in older CSV rows
+        pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
+        if "Recommended_Action" not in ledger.columns or pd.isna(ledger.at[idx, "Recommended_Action"]):
+            ledger.at[idx, "Recommended_Action"] = "🟢 BUY / ACCUMULATE" if "BULLISH" in pred_type else "🔴 SHORT / FADE (SELL)"
+            changed = True
+        if "Holding_Horizon" not in ledger.columns or pd.isna(ledger.at[idx, "Holding_Horizon"]):
+            ledger.at[idx, "Holding_Horizon"] = "1-2 Weeks (5-10 Sessions)"
+            changed = True
+
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
             continue
 
@@ -391,7 +408,13 @@ def audit_and_update_outcomes(raw_data):
             if not hist.empty:
                 curr_p = float(hist.iloc[-1])
                 init_p = float(row["CMP_At_Prediction"])
-                ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
+                
+                # Directional PnL: In a BEARISH_FADE / Sell setup, price falling yields positive return
+                is_bullish = ("BULLISH" in pred_type)
+                if is_bullish:
+                    ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
+                else:
+                    ret_pct = round(((init_p - curr_p) / init_p) * 100.0, 2)
 
                 raw_date_str = str(row["Date"]).replace(" IST", "")
                 pred_date = pd.to_datetime(raw_date_str).tz_localize(None)
@@ -404,16 +427,19 @@ def audit_and_update_outcomes(raw_data):
                 changed = True
 
                 if days >= 1:
-                    if row["Predicted_Outlook"] == "BULLISH":
+                    if is_bullish:
                         if ret_pct >= row["Target_Return_Pct"]:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
                         elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
                     else:
-                        if ret_pct <= row["Target_Return_Pct"]:
+                        # For short setups, positive directional return means successful breakdown
+                        target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
+                        stop_loss_hit = ret_pct <= -abs(float(row.get("Stop_Loss_Pct", 2.5)))
+                        if ret_pct >= target_gain:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                        elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
-                            ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct < 0 else "FAILED"
+                        elif stop_loss_hit or days >= 10:
+                            ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
 
     if changed:
         commit_github_ledger(ledger, sha)
@@ -876,7 +902,7 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
 # VIEW 5: Prediction Audit & Win Rate Ledger (GitHub Backed)
 elif nav_choice == "📊 Prediction Audit & Win Rate":
     st.subheader("📊 Self-Auditing Prediction Ledger & Success Rate")
-    st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps & Mark-to-Market PnL tracking.")
+    st.caption("Auto-synced to GitHub Repository. Directional PnL, holding horizons, and risk-adjusted metrics.")
 
     audited_ledger = audit_and_update_outcomes(raw_market_data)
 
@@ -917,7 +943,15 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         # Tranche budget modeling for monetary calculations (₹15,000 standard setup size)
         ASSUMED_TRANCHE_BUDGET = 15000.0
 
-        # Calculate monetary PnL for each individual row
+        # Backfill direction and recommended action if missing
+        if "Recommended_Action" not in display_ledger.columns:
+            display_ledger["Recommended_Action"] = display_ledger["Predicted_Outlook"].apply(
+                lambda x: "🟢 BUY / ACCUMULATE" if "BULLISH" in str(x).upper() else "🔴 SHORT / FADE (SELL)"
+            )
+        if "Holding_Horizon" not in display_ledger.columns:
+            display_ledger["Holding_Horizon"] = "1-2 Weeks (5-10 Sessions)"
+
+        # Calculate monetary PnL for each individual row based on directional return
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
         display_ledger["Live PnL %"] = display_ledger["Clean_Ret_Pct"]
@@ -957,46 +991,44 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         downside_std = eval_daily_returns[eval_daily_returns < 0].std()
         sortino_ratio = float((excess_ret.mean() / downside_std * np.sqrt(252))) if (downside_std > 0 and not np.isnan(downside_std)) else 0.0
 
-        # --- Row 1: Consolidated Performance Overview ---
-        st.markdown("#### ⚡ Consolidated Strategy Performance Overview")
-        p_c1, p_c2, p_c3, p_c4 = st.columns(4)
-        p_c1.metric(
-            "Live Unrealized PnL",
-            f"₹{live_unrealized_pnl_rs:+,.2f}",
-            f"{live_unrealized_pct:+.2f}% Mark-to-Market"
-        )
-        p_c2.metric(
-            "Active Capital Monitored",
-            f"₹{active_capital_deployed:,.2f}",
-            f"{active_pending_count} Active Setups"
-        )
-        p_c3.metric(
-            "Booked Realized PnL",
-            f"₹{closed_realized_pnl_rs:+,.2f}",
-            f"{win_rate}% Realized Win Rate"
-        )
-        p_c4.metric(
-            "Generated Alpha (vs NIFTY)",
-            f"{alpha_vs_nifty:+.2f}%",
-            f"NIFTY: {nifty_period_ret:+.2f}%"
-        )
+        # --- Collapsible 8-KPI Executive Metric Container ---
+        with st.expander("⚡ Strategy Performance & Institutional Benchmarks (8 Key Metrics)", expanded=True):
+            st.markdown("<span style='font-weight:600; font-size:0.84rem; color:#495057;'>Portfolio MTM & Alpha Dashboard</span>", unsafe_allow_html=True)
+            p_c1, p_c2, p_c3, p_c4 = st.columns(4)
+            p_c1.metric(
+                "Live Unrealized PnL",
+                f"₹{live_unrealized_pnl_rs:+,.2f}",
+                f"{live_unrealized_pct:+.2f}% Mark-to-Market"
+            )
+            p_c2.metric(
+                "Active Capital Monitored",
+                f"₹{active_capital_deployed:,.2f}",
+                f"{active_pending_count} Active Setups"
+            )
+            p_c3.metric(
+                "Booked Realized PnL",
+                f"₹{closed_realized_pnl_rs:+,.2f}",
+                f"{win_rate}% Win Rate ({successes}/{total_closed})"
+            )
+            p_c4.metric(
+                "Generated Alpha vs NIFTY",
+                f"{alpha_vs_nifty:+.2f}%",
+                f"NIFTY: {nifty_period_ret:+.2f}%"
+            )
 
-        st.markdown("---")
+            st.markdown("<div style='margin-top: 0.4rem;'></div>", unsafe_allow_html=True)
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("Strategy Net Return", f"{effective_return_pct:+.2f}%", f"{total_closed} Audits Evaluated")
+            b2.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}", "Risk-Adjusted")
+            b3.metric("Sortino Ratio", f"{sortino_ratio:.2f}", "Downside-Risk-Adjusted")
+            b4.metric("Benchmark Alpha (α)", f"{alpha_vs_nifty:+.2f}%", "Outperformance" if alpha_vs_nifty > 0 else "Underperformance")
 
-        # --- Row 2: Institutional Benchmarks & Sharpe Ratio ---
-        st.markdown("#### 🏛️ Institutional Benchmarks & Sharpe Ratio")
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("Strategy Win/Return", f"{effective_return_pct:+.2f}%", f"{total_closed} Completed Audits")
-        b2.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}", "Risk-Adjusted")
-        b3.metric("Sortino Ratio", f"{sortino_ratio:.2f}", "Downside-Risk-Adjusted")
-        b4.metric("Benchmark Alpha (α)", f"{alpha_vs_nifty:+.2f}%", "Outperformance" if alpha_vs_nifty > 0 else "Underperformance")
-
-        st.markdown("---")
+        st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
 
         # --- Interactive Controls Matching Tactical Allocator Pro ---
         f1, f2 = st.columns([1, 1])
         with f1:
-            outlook_f = st.selectbox("Filter Outlook / Setup:", ["All Outlooks Combined", "BULLISH Only", "BEARISH_FADE Only"], index=0)
+            outlook_f = st.selectbox("Filter Outlook / Setup:", ["All Outlooks Combined", "BULLISH (Buy) Only", "BEARISH_FADE (Short) Only"], index=0)
         with f2:
             status_f = st.selectbox("Filter Horizon / Status:", ["All Combined", "PENDING (Open) Only", "Completed (SUCCESS/FAILED) Only"], index=0)
 
@@ -1029,12 +1061,16 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
                 styles["Live PnL %"] = df["Live PnL %"].apply(
                     lambda v: "background-color: #d4edda; color: #155724; font-weight: bold;" if v > 0 else ("background-color: #f8d7da; color: #721c24; font-weight: bold;" if v < 0 else "")
                 )
+            if "Recommended_Action" in df.columns:
+                styles["Recommended_Action"] = df["Recommended_Action"].apply(
+                    lambda v: "color: #155724; font-weight: bold;" if "BUY" in str(v) else "color: #721c24; font-weight: bold;"
+                )
             return styles
 
         cols_display = [
-            "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
-            "Predicted_Outlook", "Confidence", "Days_Elapsed", "Current_CMP",
-            "Live PnL (₹)", "Live PnL %", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
+            "Prediction_ID", "Date", "Ticker", "Recommended_Action", "Holding_Horizon",
+            "Active_Catalyst", "CMP_At_Prediction", "Current_CMP", "Live PnL (₹)", "Live PnL %",
+            "Confidence", "Days_Elapsed", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
         # Keep only available columns
         existing_cols = [c for c in cols_display if c in filtered_ledger.columns]
