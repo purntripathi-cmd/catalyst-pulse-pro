@@ -219,7 +219,7 @@ RSS_FEEDS = {
 # =====================================================================
 # Section 2: Data Ingestion & Technical Math
 # =====================================================================
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=60)
 def fetch_corporate_catalysts(active_universe):
     news_items, matched_map, ticker_news_history = [], {}, {}
     known_syms = [x["ticker"].replace(".NS", "") for x in active_universe]
@@ -261,7 +261,7 @@ def fetch_corporate_catalysts(active_universe):
 
     return news_items, matched_map, ticker_news_history
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=60)
 def load_market_data(tickers):
     download_list = list(tickers) + ["^NSEI", "^INDIAVIX"]
     try:
