@@ -2,6 +2,7 @@
 # Section 0: Imports, Logging & High-Density UI CSS
 # =====================================================================
 import datetime
+from zoneinfo import ZoneInfo
 import logging
 import re
 import os
@@ -74,6 +75,8 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # =====================================================================
 # Section 1: Curated NIFTY 100 Universe & Reg 30 Classifier
@@ -182,7 +185,6 @@ NIFTY_100_TICKERS = [
     {"ticker": "ZYDUSLIFE.NS", "name": "Zydus Lifesciences", "category": "Pharma"},
 ]
 
-# Classification Model with Behavioral Edge Multipliers
 CATALYST_RULES = {
     "Demerger / Merger Unlock": {
         "regex": re.compile(r"(?:demerger|spin-?off|scheme of arrangement|value unlocking|merger|amalgamation)", re.IGNORECASE),
@@ -246,7 +248,7 @@ def fetch_corporate_catalysts(active_universe):
 
                 item = {
                     "source": source_name, "title": title, "summary": summary,
-                    "link": entry.get("link", "#"), "published": entry.get("published", str(datetime.date.today())),
+                    "link": entry.get("link", "#"), "published": entry.get("published", str(datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))),
                     "catalyst": detected_catalyst, "impact": impact, "p1w": p1, "p2w": p2, "group": grp, "matched": matched
                 }
                 news_items.append(item)
@@ -276,7 +278,6 @@ def load_market_data(tickers):
 LEDGER_FILENAME = "catalyst_prediction_ledger.csv"
 
 def get_github_ledger():
-    """Fetch catalyst_prediction_ledger.csv directly from GitHub Repo via API."""
     token = st.secrets.get("GITHUB_PAT", os.environ.get("GITHUB_PAT", ""))
     repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", ""))
     
@@ -307,7 +308,6 @@ def get_github_ledger():
         return empty_df, None
 
 def commit_github_ledger(updated_df, sha=None):
-    """Write updated CSV back to GitHub repository using GitHub Contents API."""
     token = st.secrets.get("GITHUB_PAT", os.environ.get("GITHUB_PAT", ""))
     repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", ""))
     
@@ -322,7 +322,7 @@ def commit_github_ledger(updated_df, sha=None):
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     
     payload = {
-        "message": f"Auto-audit: Update prediction ledger [{datetime.date.today()}]",
+        "message": f"Auto-audit: Update prediction ledger [{datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}]",
         "content": b64_content
     }
     if sha:
@@ -333,7 +333,9 @@ def commit_github_ledger(updated_df, sha=None):
 
 def log_daily_predictions_to_github(candidates_df):
     ledger, sha = get_github_ledger()
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    now_ist = datetime.datetime.now(IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
+    timestamp_str = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
     
     new_records = []
     for _, row in candidates_df.iterrows():
@@ -344,7 +346,7 @@ def log_daily_predictions_to_github(candidates_df):
         is_bullish = "Bullish" in str(row.get("1-2W Outlook", ""))
         new_records.append({
             "Prediction_ID": p_id,
-            "Date": today_str,
+            "Date": timestamp_str,
             "Ticker": row["Ticker"],
             "Active_Catalyst": row["Active Catalyst"],
             "CMP_At_Prediction": row["CMP (₹)"],
@@ -364,8 +366,6 @@ def log_daily_predictions_to_github(candidates_df):
         return len(new_records) if success else 0
     return 0
 
-
-
 def audit_and_update_outcomes(raw_data):
     ledger, sha = get_github_ledger()
     if ledger.empty or raw_data.empty:
@@ -379,7 +379,6 @@ def audit_and_update_outcomes(raw_data):
         ticker_sym = str(row["Ticker"]).replace(".NS", "")
         ns_sym = f"{ticker_sym}.NS"
 
-        # Check column existence in multi-index columns
         target_col = None
         if hasattr(raw_data, "columns") and hasattr(raw_data.columns, "levels"):
             if ns_sym in raw_data.columns.levels[0]:
@@ -394,24 +393,23 @@ def audit_and_update_outcomes(raw_data):
                 init_p = float(row["CMP_At_Prediction"])
                 ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
 
-                pred_date = pd.to_datetime(row["Date"])
-                post_data = hist[hist.index >= pred_date]
+                raw_date_str = str(row["Date"]).replace(" IST", "")
+                pred_date = pd.to_datetime(raw_date_str).tz_localize(None)
+                post_data = hist[hist.index.tz_localize(None) >= pred_date.normalize()]
                 days = max(0, len(post_data) - 1)
 
-                # Always update the live CMP, Days, and Realized Return
                 ledger.at[idx, "Current_CMP"] = curr_p
                 ledger.at[idx, "Realized_Return_Pct"] = ret_pct
                 ledger.at[idx, "Days_Elapsed"] = days
                 changed = True
 
-                # Horizon evaluation criteria (5 to 10 sessions)
                 if days >= 1:
                     if row["Predicted_Outlook"] == "BULLISH":
                         if ret_pct >= row["Target_Return_Pct"]:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
                         elif ret_pct <= row["Stop_Loss_Pct"] or days >= 10:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
-                    else:  # BEARISH_FADE
+                    else:
                         if ret_pct <= row["Target_Return_Pct"]:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
                         elif ret_pct >= row["Stop_Loss_Pct"] or days >= 10:
@@ -420,7 +418,6 @@ def audit_and_update_outcomes(raw_data):
     if changed:
         commit_github_ledger(ledger, sha)
     return ledger
-
 
 def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
     if raw_data.empty:
@@ -567,7 +564,6 @@ NAV_TABS = [
     "📖 Quantitative Strategy Handbook"
 ]
 
-# 1. Read tab from URL query params or session state
 url_tab = st.query_params.get("tab", None)
 if "active_nav_tab" not in st.session_state:
     if url_tab in NAV_TABS:
@@ -577,7 +573,6 @@ if "active_nav_tab" not in st.session_state:
 elif url_tab in NAV_TABS and st.session_state["active_nav_tab"] != url_tab:
     st.session_state["active_nav_tab"] = url_tab
 
-# Top Header Bar with Refresh
 h_col1, h_col2, h_col3 = st.columns([1.5, 1.2, 0.4])
 
 with h_col1:
@@ -605,7 +600,6 @@ with h_col3:
         st.query_params["tab"] = saved_active
         st.rerun()
 
-# 2. Callback function when tab changes manually
 def on_tab_change():
     st.query_params["tab"] = st.session_state["active_nav_tab"]
 
@@ -620,7 +614,6 @@ nav_choice = st.radio(
 
 st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
 
-# Helper function for relative Top 3 / Bottom 3 color-coding
 def apply_top3_bot3_styling(df):
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
     higher_is_better = ["Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %"]
@@ -648,7 +641,6 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
     if catalyst_df.empty:
         st.warning("⚠️ Market data feed synchronizing...")
     else:
-        # LEVEL 1: High Conviction Outlier Radar
         st.markdown("##### ⚡ Level 1: Outlier Decision Radar (Top 3-5 High-Conviction Setups)")
         up_candidates = catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].sort_values(by="Catalyst Score", ascending=False).head(5)
         down_candidates = catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].sort_values(by="Catalyst Score", ascending=True).head(5)
@@ -684,7 +676,6 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
 
         st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
-        # LEVEL 2: Corporate Action Quadrant
         st.markdown("##### 🏢 Level 2: Corporate Action Catalyst Quadrant")
         st.caption("How Indian equities statistically react across specific corporate filings: Contracts, Mergers, Dividends, and Stock Splits.")
 
@@ -727,7 +718,6 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
 
         st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
-        # LEVEL 3: Full Universe Matrix
         st.markdown("##### 🌐 Level 3: Master NIFTY 100 Evaluated Matrix")
         display_all = catalyst_df.sort_values(by="Catalyst Score", ascending=False).reset_index(drop=True)
         cols_master = ["Ticker", "Name", "CMP (₹)", "Catalyst Score", "1-2W Outlook", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %", "Active Catalyst"]
@@ -886,7 +876,7 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
 # VIEW 5: Prediction Audit & Win Rate Ledger (GitHub Backed)
 elif nav_choice == "📊 Prediction Audit & Win Rate":
     st.subheader("📊 Self-Auditing Prediction Ledger & Success Rate")
-    st.caption("Auto-synced to GitHub Repository. Monitors holding horizons and logs empirical win rates.")
+    st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps & Mark-to-Market PnL tracking.")
 
     audited_ledger = audit_and_update_outcomes(raw_market_data)
 
@@ -899,28 +889,90 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
             ])
             added = log_daily_predictions_to_github(top_setups)
             if added > 0:
-                st.success(f"✅ Committed {added} new predictions to GitHub repository ledger!")
+                st.success(f"✅ Committed {added} new predictions to GitHub repository ledger (IST)!")
                 st.rerun()
             else:
                 st.info("Today's setups are already recorded in the ledger.")
 
     if not audited_ledger.empty:
-        closed = audited_ledger[audited_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
-        pending = audited_ledger[audited_ledger["Outcome_Status"] == "PENDING"]
+        # Normalize Date column to clean IST representation for display
+        def format_ledger_ist_date(d_val):
+            if pd.isna(d_val) or str(d_val).strip() == "":
+                return "Pending"
+            try:
+                raw = str(d_val).replace(" IST", "").strip()
+                dt = pd.to_datetime(raw)
+                if dt.tzinfo is None:
+                    dt = dt.tz_localize("UTC").tz_convert(IST)
+                else:
+                    dt = dt.tz_convert(IST)
+                return dt.strftime("%Y-%m-%d %H:%M:%S IST")
+            except Exception:
+                return str(d_val)
 
+        display_ledger = audited_ledger.copy()
+        if "Date" in display_ledger.columns:
+            display_ledger["Date"] = display_ledger["Date"].apply(format_ledger_ist_date)
+
+        # Tranche budget modeling for monetary calculations (₹15,000 per setup)
+        ASSUMED_TRANCHE_BUDGET = 15000.0
+
+        closed = display_ledger[display_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])].copy()
+        pending = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
+
+        # Closed trade metrics
         total_closed = len(closed)
         successes = len(closed[closed["Outcome_Status"] == "SUCCESS"])
         win_rate = round((successes / total_closed * 100.0), 1) if total_closed > 0 else 0.0
-        avg_ret = round(closed["Realized_Return_Pct"].mean(), 2) if total_closed > 0 else 0.0
+        
+        closed["Clean_Ret_Pct"] = pd.to_numeric(closed["Realized_Return_Pct"], errors="coerce").fillna(0.0)
+        closed_realized_pnl_rs = float((closed["Clean_Ret_Pct"] / 100.0 * ASSUMED_TRANCHE_BUDGET).sum())
+        avg_closed_ret = round(float(closed["Clean_Ret_Pct"].mean()), 2) if total_closed > 0 else 0.0
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Realized Win Rate", f"{win_rate}%", f"{successes}/{total_closed} Completed")
-        m2.metric("Average Return (Completed)", f"{avg_ret:+0.2f}%")
-        m3.metric("Active Tracking (Pending)", f"{len(pending)}")
-        m4.metric("Total Ledger Entries", f"{len(audited_ledger)}")
+        # Pending live unrealized metrics
+        active_pending_count = len(pending)
+        active_capital_deployed = active_pending_count * ASSUMED_TRANCHE_BUDGET
+        pending["Clean_Ret_Pct"] = pd.to_numeric(pending["Realized_Return_Pct"], errors="coerce").fillna(0.0)
+        live_unrealized_pnl_rs = float((pending["Clean_Ret_Pct"] / 100.0 * ASSUMED_TRANCHE_BUDGET).sum())
+        live_unrealized_pct = (live_unrealized_pnl_rs / active_capital_deployed * 100.0) if active_capital_deployed > 0 else 0.0
+
+        # Benchmark Alpha calculation (vs NIFTY 50)
+        nifty_period_ret = 0.0
+        if not raw_market_data.empty and "^NSEI" in raw_market_data.columns.levels[0]:
+            n_series = raw_market_data["^NSEI"]["Close"].dropna()
+            if len(n_series) >= max(5, total_closed) and len(n_series) > 0:
+                lookback = min(len(n_series), max(10, total_closed))
+                nifty_period_ret = float(((n_series.iloc[-1] - n_series.iloc[-lookback]) / n_series.iloc[-lookback]) * 100.0)
+        
+        effective_return_pct = avg_closed_ret if total_closed > 0 else live_unrealized_pct
+        alpha_vs_nifty = effective_return_pct - nifty_period_ret
+
+        # --- Comprehensive 4-Column Consolidated Performance Banner ---
+        st.markdown("#### ⚡ Consolidated Strategy Performance Overview")
+        p_c1, p_c2, p_c3, p_c4 = st.columns(4)
+        p_c1.metric(
+            "Live Unrealized PnL",
+            f"₹{live_unrealized_pnl_rs:+,.2f}",
+            f"{live_unrealized_pct:+.2f}% Mark-to-Market"
+        )
+        p_c2.metric(
+            "Active Capital Monitored",
+            f"₹{active_capital_deployed:,.2f}",
+            f"{active_pending_count} Active Setups"
+        )
+        p_c3.metric(
+            "Booked Realized PnL",
+            f"₹{closed_realized_pnl_rs:+,.2f}",
+            f"Win Rate: {win_rate}% ({successes}/{total_closed})"
+        )
+        p_c4.metric(
+            "Alpha vs NIFTY 50",
+            f"{alpha_vs_nifty:+.2f}%",
+            f"NIFTY: {nifty_period_ret:+.2f}%"
+        )
 
         st.markdown("---")
-        st.markdown("##### 📑 Ledger Audit Trail")
+        st.markdown("##### 📑 Ledger Audit Trail (IST Real-Time Sync)")
 
         def highlight_outcomes(df):
             styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -930,10 +982,14 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
                     else ("background-color: #f8d7da; color: #721c24; font-weight: bold;" if v == "FAILED"
                     else "background-color: #fff3cd; color: #856404;")
                 )
+            if "Realized_Return_Pct" in df.columns:
+                styles["Realized_Return_Pct"] = df["Realized_Return_Pct"].apply(
+                    lambda v: "color: #155724; font-weight: bold;" if v > 0 else ("color: #721c24; font-weight: bold;" if v < 0 else "")
+                )
             return styles
 
         st.dataframe(
-            audited_ledger.style.apply(highlight_outcomes, axis=None).format({
+            display_ledger.style.apply(highlight_outcomes, axis=None).format({
                 "CMP_At_Prediction": "₹{:.2f}",
                 "Current_CMP": "₹{:.2f}",
                 "Realized_Return_Pct": "{:+0.2f}%",
