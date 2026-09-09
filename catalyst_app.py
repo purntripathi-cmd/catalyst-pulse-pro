@@ -914,8 +914,13 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         if "Date" in display_ledger.columns:
             display_ledger["Date"] = display_ledger["Date"].apply(format_ledger_ist_date)
 
-        # Tranche budget modeling for monetary calculations (₹15,000 per setup)
+        # Tranche budget modeling for monetary calculations (₹15,000 standard setup size)
         ASSUMED_TRANCHE_BUDGET = 15000.0
+
+        # Calculate monetary PnL for each individual row
+        display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
+        display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
+        display_ledger["Live PnL %"] = display_ledger["Clean_Ret_Pct"]
 
         closed = display_ledger[display_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])].copy()
         pending = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
@@ -924,16 +929,13 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         total_closed = len(closed)
         successes = len(closed[closed["Outcome_Status"] == "SUCCESS"])
         win_rate = round((successes / total_closed * 100.0), 1) if total_closed > 0 else 0.0
-        
-        closed["Clean_Ret_Pct"] = pd.to_numeric(closed["Realized_Return_Pct"], errors="coerce").fillna(0.0)
-        closed_realized_pnl_rs = float((closed["Clean_Ret_Pct"] / 100.0 * ASSUMED_TRANCHE_BUDGET).sum())
+        closed_realized_pnl_rs = float(closed["Live PnL (₹)"].sum())
         avg_closed_ret = round(float(closed["Clean_Ret_Pct"].mean()), 2) if total_closed > 0 else 0.0
 
         # Pending live unrealized metrics
         active_pending_count = len(pending)
         active_capital_deployed = active_pending_count * ASSUMED_TRANCHE_BUDGET
-        pending["Clean_Ret_Pct"] = pd.to_numeric(pending["Realized_Return_Pct"], errors="coerce").fillna(0.0)
-        live_unrealized_pnl_rs = float((pending["Clean_Ret_Pct"] / 100.0 * ASSUMED_TRANCHE_BUDGET).sum())
+        live_unrealized_pnl_rs = float(pending["Live PnL (₹)"].sum())
         live_unrealized_pct = (live_unrealized_pnl_rs / active_capital_deployed * 100.0) if active_capital_deployed > 0 else 0.0
 
         # Benchmark Alpha calculation (vs NIFTY 50)
@@ -947,7 +949,15 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         effective_return_pct = avg_closed_ret if total_closed > 0 else live_unrealized_pct
         alpha_vs_nifty = effective_return_pct - nifty_period_ret
 
-        # --- Comprehensive 4-Column Consolidated Performance Banner ---
+        # Risk metrics (Sharpe & Sortino)
+        eval_daily_returns = (closed["Clean_Ret_Pct"] / 100.0) if not closed.empty else (display_ledger["Clean_Ret_Pct"] / 100.0)
+        rf_daily = 0.065 / 252.0
+        excess_ret = eval_daily_returns - rf_daily
+        sharpe_ratio = float((excess_ret.mean() / eval_daily_returns.std() * np.sqrt(252))) if eval_daily_returns.std() > 0 else 0.0
+        downside_std = eval_daily_returns[eval_daily_returns < 0].std()
+        sortino_ratio = float((excess_ret.mean() / downside_std * np.sqrt(252))) if (downside_std > 0 and not np.isnan(downside_std)) else 0.0
+
+        # --- Row 1: Consolidated Performance Overview ---
         st.markdown("#### ⚡ Consolidated Strategy Performance Overview")
         p_c1, p_c2, p_c3, p_c4 = st.columns(4)
         p_c1.metric(
@@ -963,15 +973,44 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
         p_c3.metric(
             "Booked Realized PnL",
             f"₹{closed_realized_pnl_rs:+,.2f}",
-            f"Win Rate: {win_rate}% ({successes}/{total_closed})"
+            f"{win_rate}% Realized Win Rate"
         )
         p_c4.metric(
-            "Alpha vs NIFTY 50",
+            "Generated Alpha (vs NIFTY)",
             f"{alpha_vs_nifty:+.2f}%",
             f"NIFTY: {nifty_period_ret:+.2f}%"
         )
 
         st.markdown("---")
+
+        # --- Row 2: Institutional Benchmarks & Sharpe Ratio ---
+        st.markdown("#### 🏛️ Institutional Benchmarks & Sharpe Ratio")
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Strategy Win/Return", f"{effective_return_pct:+.2f}%", f"{total_closed} Completed Audits")
+        b2.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}", "Risk-Adjusted")
+        b3.metric("Sortino Ratio", f"{sortino_ratio:.2f}", "Downside-Risk-Adjusted")
+        b4.metric("Benchmark Alpha (α)", f"{alpha_vs_nifty:+.2f}%", "Outperformance" if alpha_vs_nifty > 0 else "Underperformance")
+
+        st.markdown("---")
+
+        # --- Interactive Controls Matching Tactical Allocator Pro ---
+        f1, f2 = st.columns([1, 1])
+        with f1:
+            outlook_f = st.selectbox("Filter Outlook / Setup:", ["All Outlooks Combined", "BULLISH Only", "BEARISH_FADE Only"], index=0)
+        with f2:
+            status_f = st.selectbox("Filter Horizon / Status:", ["All Combined", "PENDING (Open) Only", "Completed (SUCCESS/FAILED) Only"], index=0)
+
+        filtered_ledger = display_ledger.copy()
+        if "BULLISH" in outlook_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Predicted_Outlook"] == "BULLISH"]
+        elif "BEARISH" in outlook_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Predicted_Outlook"] == "BEARISH_FADE"]
+
+        if "PENDING" in status_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"] == "PENDING"]
+        elif "Completed" in status_f:
+            filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
+
         st.markdown("##### 📑 Ledger Audit Trail (IST Real-Time Sync)")
 
         def highlight_outcomes(df):
@@ -982,17 +1021,30 @@ elif nav_choice == "📊 Prediction Audit & Win Rate":
                     else ("background-color: #f8d7da; color: #721c24; font-weight: bold;" if v == "FAILED"
                     else "background-color: #fff3cd; color: #856404;")
                 )
-            if "Realized_Return_Pct" in df.columns:
-                styles["Realized_Return_Pct"] = df["Realized_Return_Pct"].apply(
+            if "Live PnL (₹)" in df.columns:
+                styles["Live PnL (₹)"] = df["Live PnL (₹)"].apply(
                     lambda v: "color: #155724; font-weight: bold;" if v > 0 else ("color: #721c24; font-weight: bold;" if v < 0 else "")
+                )
+            if "Live PnL %" in df.columns:
+                styles["Live PnL %"] = df["Live PnL %"].apply(
+                    lambda v: "background-color: #d4edda; color: #155724; font-weight: bold;" if v > 0 else ("background-color: #f8d7da; color: #721c24; font-weight: bold;" if v < 0 else "")
                 )
             return styles
 
+        cols_display = [
+            "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
+            "Predicted_Outlook", "Confidence", "Days_Elapsed", "Current_CMP",
+            "Live PnL (₹)", "Live PnL %", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
+        ]
+        # Keep only available columns
+        existing_cols = [c for c in cols_display if c in filtered_ledger.columns]
+
         st.dataframe(
-            display_ledger.style.apply(highlight_outcomes, axis=None).format({
+            filtered_ledger[existing_cols].style.apply(highlight_outcomes, axis=None).format({
                 "CMP_At_Prediction": "₹{:.2f}",
                 "Current_CMP": "₹{:.2f}",
-                "Realized_Return_Pct": "{:+0.2f}%",
+                "Live PnL (₹)": "₹{:+,.2f}",
+                "Live PnL %": "{:+0.2f}%",
                 "Target_Return_Pct": "{:+0.1f}%",
                 "Stop_Loss_Pct": "{:+0.1f}%"
             }),
