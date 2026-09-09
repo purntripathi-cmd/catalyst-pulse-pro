@@ -1,4 +1,4 @@
-Prediction_ID,Date,Ticker,Active_Catalyst,CMP_At_Prediction,Predicted_Outlook,Confidence,Target_Return_Pct,Stop_Loss_Pct,Days_Elapsed,Current_CMP,Realized_Return_Pct,Outcome_Status
-2026-09-08_ASIANPAINT,2026-09-08,ASIANPAINT,⚡ Technical Baseline,2481.6,BEARISH_FADE,High,-4.0,2.5,1,2489.0,0.3,PENDING
-2026-09-08_AXISBANK,2026-09-08,AXISBANK,⚡ Technical Baseline,1244.9,BEARISH_FADE,High,-4.0,2.5,1,1238.5,-0.51,PENDING
-2026-09-08_BPCL,2026-09-08,BPCL,⚡ Technical Baseline,303.85,BEARISH_FADE,High,-4.0,2.5,1,303.54998779296875,-0.1,PENDING
+Prediction_ID,Date,Ticker,Active_Catalyst,CMP_At_Prediction,Predicted_Outlook,Confidence,Target_Return_Pct,Stop_Loss_Pct,Days_Elapsed,Current_CMP,Realized_Return_Pct,Outcome_Status,Recommended_Action,Holding_Horizon
+2026-09-08_ASIANPAINT,2026-09-08,ASIANPAINT,⚡ Technical Baseline,2481.6,BEARISH_FADE,High,-4.0,2.5,1,2489.0,-0.3,PENDING,🔴 SHORT / FADE (SELL),1-2 Weeks (5-10 Sessions)
+2026-09-08_AXISBANK,2026-09-08,AXISBANK,⚡ Technical Baseline,1244.9,BEARISH_FADE,High,-4.0,2.5,1,1238.5,0.51,PENDING,🔴 SHORT / FADE (SELL),1-2 Weeks (5-10 Sessions)
+2026-09-08_BPCL,2026-09-08,BPCL,⚡ Technical Baseline,303.85,BEARISH_FADE,High,-4.0,2.5,1,303.54998779296875,0.1,PENDING,🔴 SHORT / FADE (SELL),1-2 Weeks (5-10 Sessions)
