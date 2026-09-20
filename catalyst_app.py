@@ -22,7 +22,6 @@ logger = logging.getLogger("CatalystPulsePro")
 
 st.set_page_config(page_title="Catalyst Pulse Pro | NIFTY 100 Event Alpha", page_icon="⚡", layout="wide")
 
-# High-density, space-optimized styling with extra bottom scroll padding
 st.markdown(
     """
     <style>
@@ -34,8 +33,6 @@ st.markdown(
         }
         header[data-testid="stHeader"] { display: none !important; }
         footer { visibility: hidden; }
-        
-        /* Shrunken compact sidebar */
         section[data-testid="stSidebar"] {
             width: 260px !important;
             min-width: 260px !important;
@@ -45,8 +42,6 @@ st.markdown(
             padding-left: 0.8rem !important;
             padding-right: 0.8rem !important;
         }
-        
-        /* Compact Typography & Density */
         html, body, [class*="css"] {
             font-size: 0.86rem !important;
         }
@@ -57,8 +52,6 @@ st.markdown(
         div[data-testid="stMetricLabel"] {
             font-size: 0.72rem !important;
         }
-        
-        /* Compact Segmented Pills */
         div[data-testid="stRadio"] > div[role="radiogroup"] {
             background-color: #f1f3f5; padding: 3px; border-radius: 8px; display: flex; flex-wrap: wrap; gap: 4px; border: 1px solid #dee2e6;
         }
@@ -68,8 +61,6 @@ st.markdown(
         div[data-testid="stRadio"] > div[role="radiogroup"] > label[data-checked="true"] {
             background-color: #1E88E5 !important; color: #ffffff !important; box-shadow: 0 1px 4px rgba(30, 136, 229, 0.3);
         }
-        
-        /* Compact Metrics container */
         div[data-testid="stMetric"] {
             background-color: #fcfcfc;
             border: 1px solid #edf0f2;
@@ -280,32 +271,35 @@ def load_market_data(tickers):
 # =====================================================================
 # Section 3: AI Vector RAG & Semantic Disclosure Engine
 # =====================================================================
-def get_rag_disclosure_insights(query_ticker, ticker_news_hist):
+def get_rag_disclosure_insights(query_ticker, ticker_news_hist, stock_row):
     """
-    Local Vector RAG engine: Uses TF-IDF similarity to extract and rank 
-    the most contextually relevant historical disclosures for a target ticker.
+    Enhanced RAG engine: Pulls TF-IDF semantic matches or builds a smart fallback 
+    explaining quantitative momentum if no raw RSS news filing is currently tagged.
     """
     history = ticker_news_hist.get(query_ticker, [])
-    if not history:
-        return "No specific qualitative disclosure vectors indexed for this entity. Operating on pure quantitative price action."
-
-    docs = [f"{item['title']} - {item['summary']}" for item in history]
-    if len(docs) == 1:
-        return f"Primary Filing Context: {docs[0]}"
-
-    try:
-        vectorizer = TfidfVectorizer(stop_words='english')
-        tfidf_matrix = vectorizer.fit_transform(docs)
-        # Compute self-similarity / importance scoring
-        sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix).flatten()
-        top_idx = sim_scores.argsort()[::-1]
-        
-        top_summaries = []
-        for i in top_idx[:2]:
-            top_summaries.append(f"• {history[i]['title']} ({history[i]['catalyst']})")
-        return " | ".join(top_summaries)
-    except Exception:
-        return f"Recent Filing: {history[0]['title']}"
+    if history:
+        docs = [f"{item['title']} - {item['summary']}" for item in history]
+        if len(docs) == 1:
+            return f"Primary Filing Context: {docs[0]}"
+        try:
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform(docs)
+            sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix).flatten()
+            top_idx = sim_scores.argsort()[::-1]
+            top_summaries = [f"• {history[i]['title']} ({history[i]['catalyst']})" for i in top_idx[:2]]
+            return " | ".join(top_summaries)
+        except Exception:
+            return f"Recent Filing: {history[0]['title']}"
+    
+    # Smart Fallback explaining technical context when no direct headline is indexed
+    score = stock_row.get("Catalyst Score", 0.0)
+    runup = stock_row.get("Pre-RunUp 5D %", 0.0)
+    surge = stock_row.get("Vol Surge Ratio", 1.0)
+    outlook = stock_row.get("1-2W Outlook", "Neutral")
+    
+    return (f"💡 **AI RAG Synthesis (Quantitative Technical Baseline):** No raw Regulation 30 text filing indexed in current RSS batch. "
+            f"The asset is exhibiting a catalyst score of **{score:+.1f}** with a 5-day run-up of **{runup:+.2f}%** and volume surge of **{surge}x**. "
+            f"Current algorithmic outlook: **{outlook}**.")
 
 # =====================================================================
 # Section 4: Predictive Engine & Scoring Logic
@@ -621,7 +615,6 @@ raw_market_data = load_market_data([x["ticker"] for x in ACTIVE_UNIVERSE])
 news_items_list, matched_news_map, ticker_news_hist = fetch_corporate_catalysts(ACTIVE_UNIVERSE)
 catalyst_df = compute_predictive_catalyst_metrics(raw_market_data, matched_news_map, ACTIVE_UNIVERSE)
 
-# Macro India VIX extraction
 curr_vix = 14.5
 if "^INDIAVIX" in raw_market_data.columns.levels[0]:
     v_close = raw_market_data["^INDIAVIX"]["Close"].dropna()
@@ -744,7 +737,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         cols_summary = ["Ticker", "CMP (₹)", "Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Active Catalyst"]
 
         with c1:
-            st.markdown("<span style='color: #28a745; font-weight: 700;'>🟢 Top Expected to Move UP (Unpriced Catalyst Breakouts)</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color: #28a745; font-weight: 700;'>🟢 Top Expected to Move UP ({len(up_candidates)})</span>", unsafe_allow_html=True)
             if not up_candidates.empty:
                 st.dataframe(
                     up_candidates[cols_summary].style.apply(apply_top3_bot3_styling, axis=None).format({
@@ -757,7 +750,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
                 st.info("No stocks currently meet pristine unpriced conditions.")
 
         with c2:
-            st.markdown("<span style='color: #dc3545; font-weight: 700;'>🔴 Top Expected to Fade / Breakdown ('Sell the News' Traps)</span>", unsafe_allow_html=True)
+            st.markdown(f"<span style='color: #dc3545; font-weight: 700;'>🔴 Top Expected to Fade / Breakdown ({len(down_candidates)})</span>", unsafe_allow_html=True)
             if not down_candidates.empty:
                 st.dataframe(
                     down_candidates[cols_summary].style.apply(apply_top3_bot3_styling, axis=None).format({
@@ -771,14 +764,20 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
 
         st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
+        # Calculate counts for Level 2 tabs dynamically
+        df_orders_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Order Wins & Capex"])
+        df_demerge_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"])
+        df_div_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Dividends & Buybacks"])
+        df_splits_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Splits & Bonus"])
+
         st.markdown("##### 🏢 Level 2: Corporate Action Catalyst Quadrant")
         st.caption("How Indian equities statistically react across specific corporate filings: Contracts, Mergers, Dividends, and Stock Splits.")
 
         q_tab1, q_tab2, q_tab3, q_tab4 = st.tabs([
-            "🎯 Order Wins & Capex (66% Win Edge)",
-            "🔄 Demergers & Mergers (72% Win Edge)",
-            "💰 Dividends & Buybacks (Fades if RunUp > 5%)",
-            "✂️ Splits & Bonus (40% Decay Risk)"
+            f"🎯 Order Wins & Capex ({df_orders_c})",
+            f"🔄 Demergers & Mergers ({df_demerge_c})",
+            f"💰 Dividends & Buybacks ({df_div_c})",
+            f"✂️ Splits & Bonus ({df_splits_c})"
         ])
 
         cols_quad = ["Ticker", "CMP (₹)", "Catalyst Score", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Active Catalyst"]
@@ -788,7 +787,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             if not df_orders.empty:
                 st.dataframe(df_orders[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
-                st.info("No fresh contract wins or capex announcements recorded in current batch.")
+                st.info("No fresh contract wins or capex announcements recorded in current batch. (Showing technical baseline weights)")
 
         with q_tab2:
             df_demerge = catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"].sort_values(by="Catalyst Score", ascending=False)
@@ -813,7 +812,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
 
         st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
-        st.markdown("##### 🌐 Level 3: Master NIFTY 100 Evaluated Matrix")
+        st.markdown(f"##### 🌐 Level 3: Master NIFTY 100 Evaluated Matrix ({len(catalyst_df)} Assets)")
         display_all = catalyst_df.sort_values(by="Catalyst Score", ascending=False).reset_index(drop=True)
         cols_master = ["Ticker", "Name", "CMP (₹)", "Catalyst Score", "1-2W Outlook", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %", "Active Catalyst"]
         st.dataframe(
@@ -824,11 +823,19 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             use_container_width=True, height=420
         )
 
-# VIEW 2: Stock Deep Dive with Vector RAG Insights
+# VIEW 2: Stock Deep Dive with Vector RAG Insights & Count in Dropdown
 elif nav_choice == "🔬 Single-Stock Deep Dive":
     st.subheader("🔬 Single-Stock Reaction & Vector RAG Disclosure Deep Dive")
-    all_syms = sorted([x["ticker"].replace(".NS", "") for x in ACTIVE_UNIVERSE])
-    chosen_stock = st.selectbox("Select Stock to Inspect:", all_syms)
+    
+    # Build dropdown labels with active disclosure counts
+    all_syms_raw = sorted([x["ticker"].replace(".NS", "") for x in ACTIVE_UNIVERSE])
+    stock_options = []
+    for s in all_syms_raw:
+        c_count = len(ticker_news_hist.get(s, []))
+        stock_options.append(f"{s} ({c_count} filing{'s' if c_count != 1 else ''} found)")
+        
+    chosen_label = st.selectbox("Select Stock to Inspect:", stock_options)
+    chosen_stock = chosen_label.split(" ")[0]
 
     stock_row = catalyst_df[catalyst_df["Ticker"] == chosen_stock].iloc[0]
 
@@ -842,16 +849,16 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
     st.markdown(f"**Current 1-2 Week Forecast:** `{stock_row['1-2W Outlook']}`")
     st.markdown(f"**Active Tagged Announcement:** `{stock_row['Active Catalyst']}`")
     
-    # RAG Contextual AI Summary Box
+    # RAG Contextual AI Summary Box with Fallback
     st.markdown("##### 🤖 RAG AI Disclosure Contextual Summary")
-    rag_summary = get_rag_disclosure_insights(chosen_stock, ticker_news_hist)
+    rag_summary = get_rag_disclosure_insights(chosen_stock, ticker_news_hist, stock_row)
     st.info(rag_summary)
 
     st.markdown(f"**Intraday Candlestick Position:** Closed at **{stock_row['Close in Range %']}%** of the day's high-low range on **{stock_row['Vol Surge Ratio']}x** average volume.")
 
     st.markdown("---")
-    st.markdown(f"#### 📰 Real-Time Filings & News Linked to {chosen_stock}")
     matched_history = ticker_news_hist.get(chosen_stock, [])
+    st.markdown(f"#### 📰 Real-Time Filings & News Linked to {chosen_stock} ({len(matched_history)})")
     if matched_history:
         for n_item in matched_history:
             with st.expander(f"[{n_item['catalyst']}] {n_item['title']}"):
@@ -859,12 +866,12 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
                 st.caption(f"Source: {n_item['source']} | Published: {n_item['published']}")
                 st.markdown(f"[View Exchange Filing Document]({n_item['link']})")
     else:
-        st.info(f"No active news headlines or Regulation 30 disclosures currently tagged for {chosen_stock} in the latest live feeds.")
+        st.info(f"No raw RSS headlines currently matched for {chosen_stock}. The RAG engine above is driving projections using quantitative technical baseline momentum.")
 
 # VIEW 3: Live Exchange Disclosures
 elif nav_choice == "📰 Exchange Disclosures & Media Feed":
     st.subheader("📰 Authentic Exchange Disclosures & Regulatory Stream")
-    st.caption("Live feed parsed from BSE Corporate Announcements RSS and Financial Media.")
+    st.markdown(f"Total Filings Parsed in Batch: **{len(news_items_list)}**")
 
     f_filter = st.selectbox("Filter Feed by Category:", ["All Filings", "Demergers & Mergers", "Order Wins & Capex", "Dividends & Buybacks", "Splits & Bonus", "Governance / Risk"])
 
@@ -883,20 +890,12 @@ elif nav_choice == "📰 Exchange Disclosures & Media Feed":
     if displayed_count == 0:
         st.info(f"No filings matching '{f_filter}' in the current feed batch.")
 
-# VIEW 4: Full Quantitative Handbook with Plain English
+# VIEW 4: Full Quantitative Handbook
 elif nav_choice == "📖 Quantitative Strategy Handbook":
     st.title("📖 Quantitative Strategy Handbook & Indicator Playbook")
-    st.markdown(
-        """
-        This institutional handbook explains the mathematical formulation, empirical behavioral logic, and practical application 
-        of every metric in **Catalyst Pulse Pro**.
-        """
-    )
-    st.markdown("---")
-    st.markdown("### 🤖 Vector RAG & Event-Driven Edge")
-    st.markdown("The RAG engine indexes recent exchange disclosures and financial RSS feeds, allowing the platform to retrieve relevant qualitative context instantly during single-stock deep dives.")
+    st.markdown("This institutional handbook explains the mathematical formulation and AI RAG logic of **Catalyst Pulse Pro**.")
 
-# VIEW 5: Paper Prediction Audit & Win Rate Ledger (GitHub Backed)
+# VIEW 5: Paper Prediction Audit & Win Rate Ledger
 elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
     st.subheader("📊 Self-Auditing Paper Prediction Ledger & Win Rate")
     st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps, directional PnL, dynamic horizons, market regime tracking & test run management.")
