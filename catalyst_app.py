@@ -214,6 +214,14 @@ RSS_FEEDS = {
     "Moneycontrol News": "https://www.moneycontrol.com/rss/MCtopnews.xml"
 }
 
+def clean_html_text(raw_text):
+    """Strips HTML tags, image links, and extra spaces from RSS summaries for clean rendering."""
+    if not raw_text:
+        return ""
+    clean = re.sub(r'<.*?>', '', raw_text)
+    clean = re.sub(r'http\S+', '', clean)
+    return clean.strip()
+
 # =====================================================================
 # Section 2: Data Ingestion & Technical Math
 # =====================================================================
@@ -226,8 +234,8 @@ def fetch_corporate_catalysts(active_universe):
         try:
             feed = feedparser.parse(feed_url)
             for entry in feed.entries[:40]:
-                title = entry.get("title", "")
-                summary = entry.get("summary", "")
+                title = clean_html_text(entry.get("title", ""))
+                summary = clean_html_text(entry.get("summary", ""))
                 full_text = f"{title} {summary}"
 
                 detected_catalyst, impact, p1, p2, grp = "⚡ General Market Notice", 1.0, 50, 50, "General"
@@ -272,10 +280,6 @@ def load_market_data(tickers):
 # Section 3: AI Vector RAG & Semantic Disclosure Engine
 # =====================================================================
 def get_rag_disclosure_insights(query_ticker, ticker_news_hist, stock_row):
-    """
-    Enhanced RAG engine: Pulls TF-IDF semantic matches or builds a smart fallback 
-    explaining quantitative momentum if no raw RSS news filing is currently tagged.
-    """
     history = ticker_news_hist.get(query_ticker, [])
     if history:
         docs = [f"{item['title']} - {item['summary']}" for item in history]
@@ -291,7 +295,6 @@ def get_rag_disclosure_insights(query_ticker, ticker_news_hist, stock_row):
         except Exception:
             return f"Recent Filing: {history[0]['title']}"
     
-    # Smart Fallback explaining technical context when no direct headline is indexed
     score = stock_row.get("Catalyst Score", 0.0)
     runup = stock_row.get("Pre-RunUp 5D %", 0.0)
     surge = stock_row.get("Vol Surge Ratio", 1.0)
@@ -764,7 +767,6 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
 
         st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
-        # Calculate counts for Level 2 tabs dynamically
         df_orders_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Order Wins & Capex"])
         df_demerge_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"])
         df_div_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Dividends & Buybacks"])
@@ -787,7 +789,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             if not df_orders.empty:
                 st.dataframe(df_orders[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
-                st.info("No fresh contract wins or capex announcements recorded in current batch. (Showing technical baseline weights)")
+                st.info("No fresh contract wins or capex announcements recorded in current batch.")
 
         with q_tab2:
             df_demerge = catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"].sort_values(by="Catalyst Score", ascending=False)
@@ -823,11 +825,10 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             use_container_width=True, height=420
         )
 
-# VIEW 2: Stock Deep Dive with Vector RAG Insights & Count in Dropdown
+# VIEW 2: Stock Deep Dive with Vector RAG Insights & Filing Index Section
 elif nav_choice == "🔬 Single-Stock Deep Dive":
     st.subheader("🔬 Single-Stock Reaction & Vector RAG Disclosure Deep Dive")
     
-    # Build dropdown labels with active disclosure counts
     all_syms_raw = sorted([x["ticker"].replace(".NS", "") for x in ACTIVE_UNIVERSE])
     stock_options = []
     for s in all_syms_raw:
@@ -849,7 +850,6 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
     st.markdown(f"**Current 1-2 Week Forecast:** `{stock_row['1-2W Outlook']}`")
     st.markdown(f"**Active Tagged Announcement:** `{stock_row['Active Catalyst']}`")
     
-    # RAG Contextual AI Summary Box with Fallback
     st.markdown("##### 🤖 RAG AI Disclosure Contextual Summary")
     rag_summary = get_rag_disclosure_insights(chosen_stock, ticker_news_hist, stock_row)
     st.info(rag_summary)
@@ -867,6 +867,31 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
                 st.markdown(f"[View Exchange Filing Document]({n_item['link']})")
     else:
         st.info(f"No raw RSS headlines currently matched for {chosen_stock}. The RAG engine above is driving projections using quantitative technical baseline momentum.")
+
+    # --- NEW ADDITION: Dedicated Vector RAG Filing Index Summary Section ---
+    st.markdown("---")
+    st.markdown("### 🗂️ Vector RAG Indexed Filings Summary (All Universe Assets)")
+    st.caption("Overview of all active filings successfully indexed and parsed by the RAG engine across the current stock universe.")
+    
+    indexed_rows = []
+    for s in all_syms_raw:
+        h_list = ticker_news_hist.get(s, [])
+        if h_list:
+            for h in h_list:
+                indexed_rows.append({
+                    "Ticker": s,
+                    "Filing Title": h["title"],
+                    "Catalyst Tag": h["catalyst"],
+                    "Source": h["source"],
+                    "Published": h["published"]
+                })
+    
+    if indexed_rows:
+        indexed_df = pd.DataFrame(indexed_rows)
+        st.markdown(f"**Total Indexed Filings Found Across Universe:** `{len(indexed_df)}`")
+        st.dataframe(indexed_df, use_container_width=True, height=220)
+    else:
+        st.info("No raw textual filings currently active in the RAG index. RSS feeds are awaiting fresh exchange circulars.")
 
 # VIEW 3: Live Exchange Disclosures
 elif nav_choice == "📰 Exchange Disclosures & Media Feed":
