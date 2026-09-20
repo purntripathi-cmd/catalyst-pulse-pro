@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger("CatalystPulsePro")
@@ -276,7 +278,37 @@ def load_market_data(tickers):
         return pd.DataFrame()
 
 # =====================================================================
-# Section 3: Predictive Engine & Scoring Logic
+# Section 3: AI Vector RAG & Semantic Disclosure Engine
+# =====================================================================
+def get_rag_disclosure_insights(query_ticker, ticker_news_hist):
+    """
+    Local Vector RAG engine: Uses TF-IDF similarity to extract and rank 
+    the most contextually relevant historical disclosures for a target ticker.
+    """
+    history = ticker_news_hist.get(query_ticker, [])
+    if not history:
+        return "No specific qualitative disclosure vectors indexed for this entity. Operating on pure quantitative price action."
+
+    docs = [f"{item['title']} - {item['summary']}" for item in history]
+    if len(docs) == 1:
+        return f"Primary Filing Context: {docs[0]}"
+
+    try:
+        vectorizer = TfidfVectorizer(stop_words='english')
+        tfidf_matrix = vectorizer.fit_transform(docs)
+        # Compute self-similarity / importance scoring
+        sim_scores = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix).flatten()
+        top_idx = sim_scores.argsort()[::-1]
+        
+        top_summaries = []
+        for i in top_idx[:2]:
+            top_summaries.append(f"• {history[i]['title']} ({history[i]['catalyst']})")
+        return " | ".join(top_summaries)
+    except Exception:
+        return f"Recent Filing: {history[0]['title']}"
+
+# =====================================================================
+# Section 4: Predictive Engine & Scoring Logic
 # =====================================================================
 LEDGER_FILENAME = "catalyst_prediction_ledger.csv"
 
@@ -389,7 +421,6 @@ def audit_and_update_outcomes(raw_data):
     for idx, row in ledger.iterrows():
         pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
         
-        # Populate legacy records if missing
         if "Recommended_Action" not in ledger.columns or pd.isna(ledger.at[idx, "Recommended_Action"]):
             ledger.at[idx, "Recommended_Action"] = "🟢 BUY / ACCUMULATE" if "BULLISH" in pred_type else "🔴 SHORT / FADE (SELL)"
             changed = True
@@ -425,7 +456,6 @@ def audit_and_update_outcomes(raw_data):
                 curr_p = float(hist.iloc[-1])
                 init_p = float(row["CMP_At_Prediction"])
                 
-                # Direction-Aware Return: In a SHORT / BEARISH_FADE setup, price dropping yields positive return
                 is_bullish = ("BULLISH" in pred_type)
                 if is_bullish:
                     ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
@@ -573,7 +603,7 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
     return pd.DataFrame(results)
 
 # =====================================================================
-# Section 4: Sidebar Controls & Header
+# Section 5: Sidebar Controls & Header
 # =====================================================================
 st.sidebar.title("⚡ Catalyst Pulse Pro")
 st.sidebar.caption("Event Alpha & Post-Announcement Drift Engine")
@@ -600,7 +630,6 @@ if "^INDIAVIX" in raw_market_data.columns.levels[0]:
 
 vix_mood = "🟢 Stable & Calm" if curr_vix < 14 else ("🟡 Normal Volatility" if curr_vix <= 21 else "⚠️ High Panic / Wild Swings")
 
-# Macro Market Regime Calculation based on NIFTY 50 Trend
 nifty_regime = "🟡 Sideways / Rangebound"
 if "^NSEI" in raw_market_data.columns.levels[0]:
     n_df = raw_market_data["^NSEI"]["Close"].dropna()
@@ -622,9 +651,6 @@ st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
 st.sidebar.caption(f"Market Regime: {nifty_regime}")
 st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
 
-# =====================================================================
-# Navigation State Persistence (URL + Session State Lock)
-# =====================================================================
 NAV_TABS = [
     "🎯 Dynamic 1-2 Week Screener",
     "🔬 Single-Stock Deep Dive",
@@ -702,7 +728,7 @@ def apply_top3_bot3_styling(df):
     return styles
 
 # =====================================================================
-# Section 5: Views
+# Section 6: Views
 # =====================================================================
 
 # VIEW 1: 3-Level Screener
@@ -728,7 +754,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
                     use_container_width=True, height=180
                 )
             else:
-                st.info("No stocks currently meet pristine unpriced conditions (RunUp <= 2.5% with high Day-1 volume).")
+                st.info("No stocks currently meet pristine unpriced conditions.")
 
         with c2:
             st.markdown("<span style='color: #dc3545; font-weight: 700;'>🔴 Top Expected to Fade / Breakdown ('Sell the News' Traps)</span>", unsafe_allow_html=True)
@@ -798,9 +824,9 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             use_container_width=True, height=420
         )
 
-# VIEW 2: Stock Deep Dive with News History
+# VIEW 2: Stock Deep Dive with Vector RAG Insights
 elif nav_choice == "🔬 Single-Stock Deep Dive":
-    st.subheader("🔬 Single-Stock Reaction & Disclosure Deep Dive")
+    st.subheader("🔬 Single-Stock Reaction & Vector RAG Disclosure Deep Dive")
     all_syms = sorted([x["ticker"].replace(".NS", "") for x in ACTIVE_UNIVERSE])
     chosen_stock = st.selectbox("Select Stock to Inspect:", all_syms)
 
@@ -815,6 +841,12 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
 
     st.markdown(f"**Current 1-2 Week Forecast:** `{stock_row['1-2W Outlook']}`")
     st.markdown(f"**Active Tagged Announcement:** `{stock_row['Active Catalyst']}`")
+    
+    # RAG Contextual AI Summary Box
+    st.markdown("##### 🤖 RAG AI Disclosure Contextual Summary")
+    rag_summary = get_rag_disclosure_insights(chosen_stock, ticker_news_hist)
+    st.info(rag_summary)
+
     st.markdown(f"**Intraday Candlestick Position:** Closed at **{stock_row['Close in Range %']}%** of the day's high-low range on **{stock_row['Vol Surge Ratio']}x** average volume.")
 
     st.markdown("---")
@@ -827,7 +859,7 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
                 st.caption(f"Source: {n_item['source']} | Published: {n_item['published']}")
                 st.markdown(f"[View Exchange Filing Document]({n_item['link']})")
     else:
-        st.info(f"No active news headlines or Regulation 30 disclosures currently tagged for {chosen_stock} in the latest live feeds. Metrics represent pure quantitative technical baseline.")
+        st.info(f"No active news headlines or Regulation 30 disclosures currently tagged for {chosen_stock} in the latest live feeds.")
 
 # VIEW 3: Live Exchange Disclosures
 elif nav_choice == "📰 Exchange Disclosures & Media Feed":
@@ -857,90 +889,12 @@ elif nav_choice == "📖 Quantitative Strategy Handbook":
     st.markdown(
         """
         This institutional handbook explains the mathematical formulation, empirical behavioral logic, and practical application 
-        of every metric in **Catalyst Pulse Pro**. It is designed so that both quantitative funds and common investors can make 
-        unbiased, data-backed decisions.
+        of every metric in **Catalyst Pulse Pro**.
         """
     )
     st.markdown("---")
-
-    h1, h2 = st.columns(2)
-
-    with h1:
-        st.markdown(
-            """
-            ### 🔹 1. Pre-Event Run-up (5D Lookback)
-            * **Mathematical Formula:**
-              $$\\text{Run-up}_{5D} = \\left( \\frac{\\text{CMP} - \\text{Price}_{t-5}}{\\text{Price}_{t-5}} \\right) \\times 100$$
-            * **Technical Purpose:** Measures whether information leaked or smart money already bought the asset prior to public news release.
-            * **🗣️ Common Man Explanation:** 
-              Imagine a movie everyone expects to be a blockbuster. If the tickets sell for 10x the price before release, even a good movie can disappoint investors. 
-              If a stock already gained $+10\\%$ in the 5 days *before* winning a contract, large investors use the good news to sell their shares to excited retail buyers (**"Sell the News"**).
-            * **How to Conclude:**
-              - **$\\le +2.5\\%$:** Safe to enter. The news is a genuine surprise.
-              - **$> +7.5\\%$:** 🚫 DANGER. Do not buy, even if the news looks incredible.
-
-            ---
-
-            ### 🔹 2. Volume Surge Ratio
-            * **Mathematical Formula:**
-              $$\\text{Surge Ratio} = \\frac{\\text{Volume}_{\\text{Today}}}{\\text{Average Volume}_{20\\text{D}}}$$
-            * **Technical Purpose:** Distinguishes institutional block buying from retail noise.
-            * **🗣️ Common Man Explanation:** 
-              When a small retail investor buys shares, trading volume barely moves. When large domestic institutions (DIIs) or foreign funds (FIIs) buy, volume spikes dramatically ($2\\times$ to $5\\times$ normal).
-            * **How to Conclude:**
-              - **$\\ge 2.0\\times$:** Institutional backing confirmed.
-              - **$< 1.0\\times$:** Retail-only excitement. Avoid chasing.
-
-            ---
-
-            ### 🔹 3. Intraday Close in Range %
-            * **Mathematical Formula:**
-              $$\\text{Close in Range \\%} = \\left( \\frac{\\text{CMP} - \\text{Low}_{\\text{Day}}}{\\text{High}_{\\text{Day}} - \\text{Low}_{\\text{Day}}} \\right) \\times 100$$
-            * **Technical Purpose:** Detects distribution rejection wicks on daily candles.
-            * **🗣️ Common Man Explanation:** 
-              A stock opens $+5\\%$ higher at 9:15 AM because of good news. If it closes at 3:30 PM near its day's highest point ($> 70\\%$), buyers stayed in control. But if it falls all day and closes near its lowest price ($< 35\\%$), it means large funds dumped their shares all afternoon.
-            * **How to Conclude:**
-              - **$\\ge 65\\%$:** Strong institutional absorption $\\rightarrow$ High odds of upward continuation.
-              - **$\\le 35\\%$:** Rejection trap $\\rightarrow$ Expect multi-day downward fade.
-            """
-        )
-
-    with h2:
-        st.markdown(
-            """
-            ### 🔹 4. Success Probabilities: P(1W) & P(2W)
-            * **Mathematical Modeling:** Empirical win-rate probability derived from post-announcement abnormal returns over 5 sessions (1 week) and 10 sessions (2 weeks), dynamically adjusted by volume and run-up friction:
-              $$P(1W) = \\text{Base}_{\\text{Event}} + \\text{Adj}_{\\text{Run-up}} + \\text{Adj}_{\\text{Volume}} + \\text{Adj}_{\\text{Trend}}$$
-            * **🗣️ Common Man Explanation:** 
-              The historical odds that this stock will be trading higher 1 week and 2 weeks from today based on the exact type of news and how the market reacted today.
-            * **How to Conclude:**
-              - **$P(1W) \\ge 70\\%$:** Statistical green light for a 5-to-10 day swing trade.
-              - **$P(1W) \\le 40\\%$:** High probability of capital loss over the coming fortnight.
-
-            ---
-
-            ### 🔹 5. Corporate Action Behavior Playbook
-            * **1. Demergers & Value Unlocks (Base Edge: $72\\%$):**
-              Demergers physically unlock hidden subsidiary value and force institutional index funds to adjust portfolios, leading to sustained positive multi-week drift.
-            * **2. Mega Contracts & Capex (Base Edge: $66\\%$):**
-              Expands future revenue run-rate. Strong positive drift **only if** the pre-event run-up was small ($\le 3\%$).
-            * **3. Dividends & Buybacks (Base Edge: $46\\%$):**
-              Dividends extract cash from the company balance sheet. Once the ex-dividend date passes, stock prices automatically drop by the dividend amount, often creating a multi-week decay.
-            * **4. Bonus Issues & Stock Splits (Base Edge: $40\\%$):**
-              Splits and bonuses do not add a single rupee of fundamental value—they simply divide the same pizza into smaller slices. Retail investors often chase them mistakenly thinking the stock is "cheap," leading to heavy institutional profit-booking.
-            """
-        )
-
-    st.markdown("---")
-    st.markdown("### 🧭 Step-by-Step Practical Decision Flowchart")
-    st.markdown(
-        """
-        1. **Check Level 1 Screener:** Look at the **Top Expected to Move UP**. Verify that `Pre-RunUp 5D %` is $\\le 2.5\\%$ and `Vol Surge Ratio` is $\\ge 2.0\\times$.
-        2. **Confirm Trend in Level 3:** Check that `Dist 200DMA %` is positive ($> 0\\%$). Never buy a news breakout on a stock falling below its 200 DMA.
-        3. **Inspect the Corporate Action in Tab 2:** Go to **Single-Stock Deep Dive** and read the actual disclosure text to verify execution timelines.
-        4. **Execute with Discipline:** If all conditions align, allocate standard capital. Protect with a stop-loss placed just below the low of the announcement candle.
-        """
-    )
+    st.markdown("### 🤖 Vector RAG & Event-Driven Edge")
+    st.markdown("The RAG engine indexes recent exchange disclosures and financial RSS feeds, allowing the platform to retrieve relevant qualitative context instantly during single-stock deep dives.")
 
 # VIEW 5: Paper Prediction Audit & Win Rate Ledger (GitHub Backed)
 elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
@@ -963,7 +917,6 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             else:
                 st.info("Today's setups are already recorded in the ledger.")
 
-    # Collapsible Test Run Deletion & Ledger Clean-up Tool
     with st.expander("🛠️ Manage & Delete Test Runs / Selected Entries", expanded=False):
         st.caption("Select specific test predictions to permanently purge from the GitHub repository ledger.")
         if not audited_ledger.empty and "Prediction_ID" in audited_ledger.columns:
@@ -982,8 +935,6 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                             st.rerun()
                         else:
                             st.error("Failed to commit ledger changes to GitHub.")
-                    else:
-                        st.warning("Please select at least one record to delete.")
 
     if not audited_ledger.empty:
         def format_ledger_ist_date(d_val):
@@ -1052,30 +1003,13 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         downside_std = eval_daily_returns[eval_daily_returns < 0].std()
         sortino_ratio = float((excess_ret.mean() / downside_std * np.sqrt(252))) if (downside_std > 0 and not np.isnan(downside_std)) else 0.0
 
-        # --- Collapsible 8-KPI Executive Metric Container ---
         with st.expander("⚡ Strategy Performance & Institutional Benchmarks (8 Key Metrics)", expanded=True):
             st.markdown("<span style='font-weight:600; font-size:0.84rem; color:#495057;'>Portfolio MTM & Alpha Dashboard</span>", unsafe_allow_html=True)
             p_c1, p_c2, p_c3, p_c4 = st.columns(4)
-            p_c1.metric(
-                "Live Unrealized PnL",
-                f"₹{live_unrealized_pnl_rs:+,.2f}",
-                f"{live_unrealized_pct:+.2f}% Mark-to-Market"
-            )
-            p_c2.metric(
-                "Active Capital Monitored",
-                f"₹{active_capital_deployed:,.2f}",
-                f"{active_pending_count} Active Setups"
-            )
-            p_c3.metric(
-                "Booked Realized PnL",
-                f"₹{closed_realized_pnl_rs:+,.2f}",
-                f"{win_rate}% Win Rate ({successes}/{total_closed})"
-            )
-            p_c4.metric(
-                "Generated Alpha vs NIFTY",
-                f"{alpha_vs_nifty:+.2f}%",
-                f"NIFTY: {nifty_period_ret:+.2f}%"
-            )
+            p_c1.metric("Live Unrealized PnL", f"₹{live_unrealized_pnl_rs:+,.2f}", f"{live_unrealized_pct:+.2f}% Mark-to-Market")
+            p_c2.metric("Active Capital Monitored", f"₹{active_capital_deployed:,.2f}", f"{active_pending_count} Active Setups")
+            p_c3.metric("Booked Realized PnL", f"₹{closed_realized_pnl_rs:+,.2f}", f"{win_rate}% Win Rate ({successes}/{total_closed})")
+            p_c4.metric("Generated Alpha vs NIFTY", f"{alpha_vs_nifty:+.2f}%", f"NIFTY: {nifty_period_ret:+.2f}%")
 
             st.markdown("<div style='margin-top: 0.4rem;'></div>", unsafe_allow_html=True)
             b1, b2, b3, b4 = st.columns(4)
@@ -1086,7 +1020,6 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
 
-        # --- Interactive Controls Matching Tactical Allocator Pro ---
         f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
         with f1:
             outlook_f = st.selectbox("Filter Outlook / Setup:", ["All Outlooks Combined", "BULLISH (Buy) Only", "BEARISH_FADE (Short) Only"], index=0)
@@ -1138,20 +1071,6 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 styles["Live PnL %"] = df["Live PnL %"].apply(
                     lambda v: "background-color: #d4edda; color: #155724; font-weight: bold;" if v > 0 else ("background-color: #f8d7da; color: #721c24; font-weight: bold;" if v < 0 else "")
                 )
-            if "Recommended_Action" in df.columns:
-                styles["Recommended_Action"] = df["Recommended_Action"].apply(
-                    lambda v: "color: #155724; font-weight: bold;" if "BUY" in str(v) else "color: #721c24; font-weight: bold;"
-                )
-            if "Trigger_Type" in df.columns:
-                styles["Trigger_Type"] = df["Trigger_Type"].apply(
-                    lambda v: "background-color: #e3f2fd; color: #0d47a1; font-weight: 600;" if "MANUAL" in str(v) else "background-color: #f3e5f5; color: #4a148c;"
-                )
-            if "Market_Regime" in df.columns:
-                styles["Market_Regime"] = df["Market_Regime"].apply(
-                    lambda v: "background-color: #d4edda; color: #155724; font-weight: 600;" if "Bull" in str(v)
-                    else ("background-color: #f8d7da; color: #721c24; font-weight: 600;" if "Bear" in str(v)
-                    else "background-color: #fff3cd; color: #856404;")
-                )
             return styles
 
         cols_display = [
@@ -1173,4 +1092,4 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             use_container_width=True
         )
     else:
-        st.info("No predictions recorded yet. Click 'Record Today\\'s Top Predictions' to initialize the audit trail.")
+        st.info("No predictions recorded yet.")
