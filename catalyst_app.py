@@ -229,11 +229,20 @@ def clean_html_text(raw_text):
 def fetch_corporate_catalysts(active_universe):
     news_items, matched_map, ticker_news_history = [], {}, {}
     known_syms = [x["ticker"].replace(".NS", "") for x in active_universe]
+    
+    # Strict freshness filter: Ignore any RSS items older than 7 days
+    cutoff_date = datetime.datetime.now(IST) - datetime.timedelta(days=7)
 
     for source_name, feed_url in RSS_FEEDS.items():
         try:
             feed = feedparser.parse(feed_url)
             for entry in feed.entries[:40]:
+                pub_parsed = entry.get("published_parsed", entry.get("updated_parsed", None))
+                if pub_parsed:
+                    pub_dt = datetime.datetime(*pub_parsed[:6], tzinfo=datetime.timezone.utc).astimezone(IST)
+                    if pub_dt < cutoff_date:
+                        continue
+
                 title = clean_html_text(entry.get("title", ""))
                 summary = clean_html_text(entry.get("summary", ""))
                 full_text = f"{title} {summary}"
@@ -868,7 +877,6 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
     else:
         st.info(f"No raw RSS headlines currently matched for {chosen_stock}. The RAG engine above is driving projections using quantitative technical baseline momentum.")
 
-    # --- NEW ADDITION: Dedicated Vector RAG Filing Index Summary Section ---
     st.markdown("---")
     st.markdown("### 🗂️ Vector RAG Indexed Filings Summary (All Universe Assets)")
     st.caption("Overview of all active filings successfully indexed and parsed by the RAG engine across the current stock universe.")
