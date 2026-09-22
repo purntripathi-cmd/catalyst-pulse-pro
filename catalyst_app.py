@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Corrected timezone normalization to prevent UTC-to-IST date shifting.
+# Remarks Updated: 2026-09-22 - Refined scoring sort logic & added rationale KPIs for execution transparency.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
@@ -378,7 +378,6 @@ def normalize_to_ist(dt_val):
     raw_str = str(dt_val).replace(" IST", "").strip()
     try:
         dt = pd.to_datetime(raw_str)
-        # If timestamp is already naive or localized, treat it as exact IST local time without double-shifting
         if dt.tzinfo is not None:
             dt = dt.tz_convert(IST)
         return dt.strftime("%Y-%m-%d %H:%M:%S IST")
@@ -425,7 +424,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Current_CMP": row["CMP (₹)"],
             "Realized_Return_Pct": 0.0,
             "Outcome_Status": "PENDING",
-            "Remarks": "2026-09-22: Logged setup with direct IST timestamp."
+            "Remarks": f"Score: {cat_score_val:+.1f} | Vol: {row.get('Vol Surge Ratio', 1.0)}x | RunUp: {row.get('Pre-RunUp 5D %', 0.0):+.1f}%"
         })
     
     if new_records:
@@ -471,7 +470,7 @@ def audit_and_update_outcomes(raw_data):
             ledger.at[idx, "Catalyst_Score"] = -12.5 if "BEARISH" in pred_type else 15.0
             changed = True
         if "Remarks" not in ledger.columns or pd.isna(ledger.at[idx, "Remarks"]):
-            ledger.at[idx, "Remarks"] = "2026-09-22: Routine audit sync active."
+            ledger.at[idx, "Remarks"] = "Routine audit sync active."
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -516,20 +515,16 @@ def audit_and_update_outcomes(raw_data):
                     if is_bullish:
                         if ret_pct >= row["Target_Return_Pct"]:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                            ledger.at[idx, "Remarks"] = "2026-09-22: Target achieved successfully."
                         elif ret_pct <= row["Stop_Loss_Pct"] or days >= max_allowed_days:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
-                            ledger.at[idx, "Remarks"] = "2026-09-22: Long position closed via stop-loss or timeout."
                     else:
                         target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
                         stop_loss_hit = ret_pct <= -abs(float(row.get("Stop_Loss_Pct", 2.5)))
                         
                         if ret_pct >= target_gain:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                            ledger.at[idx, "Remarks"] = "2026-09-22: Short fade target achieved."
                         elif stop_loss_hit or days >= max_allowed_days:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
-                            ledger.at[idx, "Remarks"] = "2026-09-22: Short position closed via stop-loss or timeout."
 
     if changed:
         commit_github_ledger(ledger, sha)
@@ -777,7 +772,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
     if catalyst_df.empty:
         st.warning("⚠️ Market data feed synchronizing...")
     else:
-        st.markdown("##### ⚡ Level 1: Outlier Decision Radar (Top 3-5 High-Conviction Setups)")
+        st.markdown("##### ⚡ Level 1: Outlier Decision Radar (Top High-Conviction Setups Sorted by Score)")
         up_candidates = catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].sort_values(by="Catalyst Score", ascending=False).head(5)
         down_candidates = catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].sort_values(by="Catalyst Score", ascending=True).head(5)
 
@@ -795,7 +790,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
                     use_container_width=True, height=180
                 )
             else:
-                st.info("No stocks currently meet pristine unpriced conditions.")
+                st.info("No stocks currently meet bullish breakout criteria under current market regime.")
 
         with c2:
             st.markdown(f"<span style='color: #dc3545; font-weight: 700;'>🔴 Top Expected to Fade / Breakdown ({len(down_candidates)})</span>", unsafe_allow_html=True)
@@ -860,6 +855,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
         st.markdown(f"##### 🌐 Level 3: Master NIFTY 100 Evaluated Matrix ({len(catalyst_df)} Assets)")
+        st.caption("Sorted strictly by Catalyst Score (Highest Bullish to Lowest Bearish/Fade).")
         display_all = catalyst_df.sort_values(by="Catalyst Score", ascending=False).reset_index(drop=True)
         cols_master = ["Ticker", "Name", "CMP (₹)", "Catalyst Score", "1-2W Outlook", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %", "Active Catalyst"]
         st.dataframe(
@@ -994,12 +990,12 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
     with col_btn1:
         if st.button("📥 Record Today's Top Predictions (Manual Trigger)", use_container_width=True):
             top_setups = pd.concat([
-                catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].head(3),
-                catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].head(3)
+                catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Bullish")].sort_values(by="Catalyst Score", ascending=False).head(3),
+                catalyst_df[catalyst_df["1-2W Outlook"].str.contains("Distribution")].sort_values(by="Catalyst Score", ascending=True).head(3)
             ])
             added = log_daily_predictions_to_github(top_setups, trigger_type="MANUAL_WEB_UI", current_regime_label=regime_tag_full)
             if added > 0:
-                st.success(f"✅ Recorded {added} new predictions under {nifty_regime} (IST)!")
+                st.success(f"✅ Recorded {added} top high-conviction predictions under {nifty_regime} (IST)!")
                 st.rerun()
             else:
                 st.info("Today's setups are already recorded in the ledger.")
@@ -1148,7 +1144,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 confidence_val = str(h_row.get("Confidence", "75%"))
                 entry_score_val = float(h_row.get("Catalyst_Score", 0.0))
                 exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
-                remarks_val = str(h_row.get("Remarks", "2026-09-22: Active holding."))
+                remarks_val = str(h_row.get("Remarks", "Active holding."))
 
                 portfolio_summary_rows.append({
                     "Asset Name": f"{t_sym} - {matched_name}",
@@ -1162,7 +1158,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Current Price (₹)": current_price,
                     "% Return": ret_pct,
                     "Live PnL (₹)": float(h_row["Live PnL (₹)"]),
-                    "Remarks": remarks_val
+                    "Rationale / Remarks": remarks_val
                 })
 
             port_summary_df = pd.DataFrame(portfolio_summary_rows)
@@ -1308,7 +1304,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 confidence_val = str(j_row.get("Confidence", "75%"))
                 entry_score_val = float(j_row.get("Catalyst_Score", 0.0))
                 exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
-                remarks_val = str(j_row.get("Remarks", "2026-09-22: Closed position."))
+                remarks_val = str(j_row.get("Remarks", "Closed position."))
 
                 journal_rows.append({
                     "Timestamp": j_row["Date"],
@@ -1324,7 +1320,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Square-Off Status": sq_status,
                     "Realized PnL (₹)": pnl_rs,
                     "Return %": pnl_pct,
-                    "Remarks": remarks_val
+                    "Rationale / Remarks": remarks_val
                 })
 
             journal_df = pd.DataFrame(journal_rows)
@@ -1357,7 +1353,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         # =====================================================================
         st.markdown("<div style='margin-top: 1.5rem;'></div>", unsafe_allow_html=True)
         st.markdown("##### 📅 Daily Purchase & Sale Execution Journal (Open Positions Only)")
-        st.caption("Chronological record tracking active open holdings currently pending square-off.")
+        st.caption("Chronological record tracking active open holdings currently pending square-off, including analytical trade rationale.")
 
         open_ledger_df = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
 
@@ -1376,7 +1372,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 confidence_val = str(o_row.get("Confidence", "75%"))
                 entry_score_val = float(o_row.get("Catalyst_Score", 0.0))
                 exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
-                remarks_val = str(o_row.get("Remarks", "2026-09-22: Active open position."))
+                remarks_val = str(o_row.get("Remarks", "Active open position."))
 
                 open_rows.append({
                     "Timestamp": o_row["Date"],
@@ -1392,7 +1388,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Square-Off Status": "Open / Active",
                     "Live PnL (₹)": pnl_rs,
                     "Return %": pnl_pct,
-                    "Remarks": remarks_val
+                    "Rationale / Remarks": remarks_val
                 })
 
             open_df = pd.DataFrame(open_rows)
