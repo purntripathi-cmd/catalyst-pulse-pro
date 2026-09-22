@@ -177,7 +177,7 @@ NIFTY_100_TICKERS = [
     {"ticker": "VBL.NS", "name": "Varun Beverages", "category": "Beverages"},
     {"ticker": "VEDL.NS", "name": "Vedanta Ltd", "category": "Metals"},
     {"ticker": "WIPRO.NS", "name": "Wipro", "category": "IT Services"},
-    {"ticker": "ZOMATO.NS", "name": "Zomato", "category": "Internet / Platform"},
+    {"ticker": "ZOMATO.NS", "name": "ZOMATO", "category": "Internet / Platform"},
     {"ticker": "ZYDUSLIFE.NS", "name": "Zydus Lifesciences", "category": "Pharma"},
 ]
 
@@ -323,7 +323,7 @@ def get_github_ledger():
     empty_df = pd.DataFrame(columns=[
         "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
         "Predicted_Outlook", "Recommended_Action", "Holding_Horizon", "Target_Days",
-        "Market_Regime", "Trigger_Type", "Confidence", "Target_Return_Pct", "Stop_Loss_Pct",
+        "Market_Regime", "Trigger_Type", "Confidence", "Catalyst_Score", "Target_Return_Pct", "Stop_Loss_Pct",
         "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
     ])
     
@@ -389,6 +389,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
         horizon_val = str(row.get("Dynamic Horizon", "🎯 Tactical Swing (1-2 Weeks)"))
         target_days_val = int(row.get("Target Days", 8))
         prob_1w_val = int(row.get("P(1W) Drift %", 75))
+        cat_score_val = float(row.get("Catalyst Score", 0.0))
         
         new_records.append({
             "Prediction_ID": p_id,
@@ -403,6 +404,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Market_Regime": current_regime_label,
             "Trigger_Type": trigger_type,
             "Confidence": f"{prob_1w_val}%",
+            "Catalyst_Score": cat_score_val,
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
             "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
             "Days_Elapsed": 0,
@@ -443,6 +445,9 @@ def audit_and_update_outcomes(raw_data):
             changed = True
         if "Confidence" not in ledger.columns or pd.isna(ledger.at[idx, "Confidence"]) or str(ledger.at[idx, "Confidence"]).lower() in ["high", "medium", "low"]:
             ledger.at[idx, "Confidence"] = "75%"
+            changed = True
+        if "Catalyst_Score" not in ledger.columns or pd.isna(ledger.at[idx, "Catalyst_Score"]):
+            ledger.at[idx, "Catalyst_Score"] = 0.0
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -1005,6 +1010,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             display_ledger["Market_Regime"] = "🟡 Sideways / Rangebound"
         if "Confidence" not in display_ledger.columns:
             display_ledger["Confidence"] = "75%"
+        if "Catalyst_Score" not in display_ledger.columns:
+            display_ledger["Catalyst_Score"] = 0.0
 
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
@@ -1084,6 +1091,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 current_price = float(h_row["Current_CMP"])
                 ret_pct = float(h_row["Clean_Ret_Pct"])
                 confidence_val = str(h_row.get("Confidence", "75%"))
+                cat_score_val = float(h_row.get("Catalyst_Score", 0.0))
 
                 portfolio_summary_rows.append({
                     "Asset Name": f"{t_sym} - {matched_name}",
@@ -1091,6 +1099,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Square-Off Time": "Open (Active)",
                     "Total Holding Age": f"{holding_age_days} Days",
                     "Confidence Level": confidence_val,
+                    "Catalyst Score": f"{cat_score_val:+.1f}",
                     "Purchase Price (₹)": purchase_price,
                     "Current Price (₹)": current_price,
                     "% Return": ret_pct,
@@ -1176,7 +1185,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         cols_display = [
             "Prediction_ID", "Date", "Square-Off Time", "Ticker", "Trigger_Type", "Market_Regime", 
-            "Recommended_Action", "Holding_Horizon", "Active_Catalyst", "CMP_At_Prediction", 
+            "Recommended_Action", "Holding_Horizon", "Active_Catalyst", "Catalyst_Score", "CMP_At_Prediction", 
             "Current_CMP", "Live PnL (₹)", "Live PnL %", "Confidence", "Days_Elapsed", 
             "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
@@ -1184,6 +1193,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         st.dataframe(
             filtered_ledger[existing_cols].style.apply(highlight_outcomes, axis=None).format({
+                "Catalyst_Score": "{:+.1f}",
                 "CMP_At_Prediction": "₹{:.2f}",
                 "Current_CMP": "₹{:.2f}",
                 "Live PnL (₹)": "₹{:+,.2f}",
@@ -1234,6 +1244,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 pnl_rs = float(j_row["Live PnL (₹)"])
                 pnl_pct = float(j_row["Clean_Ret_Pct"])
                 confidence_val = str(j_row.get("Confidence", "75%"))
+                cat_score_val = float(j_row.get("Catalyst_Score", 0.0))
 
                 journal_rows.append({
                     "Timestamp": j_row["Date"],
@@ -1241,6 +1252,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Action": action_type,
                     "Ticker": t_sym,
                     "Confidence Level": confidence_val,
+                    "Catalyst Score": f"{cat_score_val:+.1f}",
                     "Approx. Amount (₹)": approx_amount,
                     "Execution Price (₹)": purchase_price,
                     "Exit Price (₹)": exit_price,
