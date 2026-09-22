@@ -215,7 +215,6 @@ RSS_FEEDS = {
 }
 
 def clean_html_text(raw_text):
-    """Strips HTML tags, image links, and extra spaces from RSS summaries for clean rendering."""
     if not raw_text:
         return ""
     clean = re.sub(r'<.*?>', '', raw_text)
@@ -1051,7 +1050,9 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             b3.metric("Sortino Ratio", f"{sortino_ratio:.2f}", "Downside-Risk-Adjusted")
             b4.metric("Benchmark Alpha (α)", f"{alpha_vs_nifty:+.2f}%", "Outperformance" if alpha_vs_nifty > 0 else "Underperformance")
 
-        # Portfolio Holding Summary Table
+        # =====================================================================
+        # TABLE 1: Active Portfolio Holdings & Holding Age Breakdown
+        # =====================================================================
         st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
         st.markdown("##### 💼 Active Portfolio Holdings & Holding Age Breakdown")
         
@@ -1079,6 +1080,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
                 portfolio_summary_rows.append({
                     "Asset Name": f"{t_sym} - {matched_name}",
+                    "Purchase Timestamp": raw_dt_str,
+                    "Square-Off Time": "Open (Active)",
                     "Total Holding Age": f"{holding_age_days} Days",
                     "Purchase Price (₹)": purchase_price,
                     "Current Price (₹)": current_price,
@@ -1136,7 +1139,14 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         elif "Sideways" in regime_f:
             filtered_ledger = filtered_ledger[filtered_ledger["Market_Regime"].str.contains("Sideways|Range", na=False)]
 
+        # =====================================================================
+        # TABLE 2: Ledger Audit Trail
+        # =====================================================================
         st.markdown("##### 📑 Ledger Audit Trail (IST Real-Time Sync)")
+
+        display_ledger["Square-Off Time"] = display_ledger.apply(
+            lambda r: r["Date"] if r["Outcome_Status"] in ["SUCCESS", "FAILED"] else "Open (Active)", axis=1
+        )
 
         def highlight_outcomes(df):
             styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -1157,9 +1167,10 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             return styles
 
         cols_display = [
-            "Prediction_ID", "Date", "Ticker", "Trigger_Type", "Market_Regime", "Recommended_Action", "Holding_Horizon",
-            "Active_Catalyst", "CMP_At_Prediction", "Current_CMP", "Live PnL (₹)", "Live PnL %",
-            "Confidence", "Days_Elapsed", "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
+            "Prediction_ID", "Date", "Square-Off Time", "Ticker", "Trigger_Type", "Market_Regime", 
+            "Recommended_Action", "Holding_Horizon", "Active_Catalyst", "CMP_At_Prediction", 
+            "Current_CMP", "Live PnL (₹)", "Live PnL %", "Confidence", "Days_Elapsed", 
+            "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
         existing_cols = [c for c in cols_display if c in filtered_ledger.columns]
 
@@ -1174,5 +1185,72 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             }),
             use_container_width=True
         )
+
+        # =====================================================================
+        # TABLE 3: Daily Purchase & Sale Execution Journal
+        # =====================================================================
+        st.markdown("<div style='margin-top: 1.0rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### 📅 Daily Purchase & Sale Execution Journal")
+        st.caption("Chronological record showing exact buy/sell actions, approximate execution amounts, prices, timestamps, and square-off status.")
+
+        if not display_ledger.empty:
+            journal_rows = []
+            for _, j_row in display_ledger.iterrows():
+                t_sym = str(j_row["Ticker"]).replace(".NS", "")
+                status = str(j_row.get("Outcome_Status", "PENDING")).upper()
+                outlook = str(j_row.get("Predicted_Outlook", "")).upper()
+                
+                action_type = "BUY / LONG" if "BULLISH" in outlook else "SHORT / FADE"
+                
+                if status in ["SUCCESS", "FAILED"]:
+                    sq_status = f"Squared Off ({status})"
+                    sq_time = j_row["Date"]
+                else:
+                    sq_status = "Open / Active"
+                    sq_time = "Pending Square-Off"
+
+                purchase_price = float(j_row["CMP_At_Prediction"])
+                current_or_exit_price = float(j_row["Current_CMP"])
+                approx_amount = ASSUMED_TRANCHE_BUDGET
+                pnl_rs = float(j_row["Live PnL (₹)"])
+                pnl_pct = float(j_row["Clean_Ret_Pct"])
+
+                journal_rows.append({
+                    "Timestamp": j_row["Date"],
+                    "Square-Off Time": sq_time,
+                    "Action": action_type,
+                    "Ticker": t_sym,
+                    "Approx. Amount (₹)": approx_amount,
+                    "Execution Price (₹)": purchase_price,
+                    "Current / Exit Price (₹)": current_or_exit_price,
+                    "Square-Off Status": sq_status,
+                    "Realized / Live PnL (₹)": pnl_rs,
+                    "Return %": pnl_pct
+                })
+
+            journal_df = pd.DataFrame(journal_rows)
+            journal_df["Parsed_DT"] = pd.to_datetime(journal_df["Timestamp"].astype(str).str.replace(" IST", "").str.strip(), errors="coerce")
+            journal_df = journal_df.sort_values(by="Parsed_DT", ascending=False).drop(columns=["Parsed_DT"]).reset_index(drop=True)
+
+            def style_journal(df):
+                styles = pd.DataFrame("", index=df.index, columns=df.columns)
+                if "Realized / Live PnL (₹)" in df.columns:
+                    styles["Realized / Live PnL (₹)"] = df["Realized / Live PnL (₹)"].apply(
+                        lambda v: "color: #155724; font-weight: bold;" if v > 0 else ("color: #721c24; font-weight: bold;" if v < 0 else "")
+                    )
+                return styles
+
+            st.dataframe(
+                journal_df.style.apply(style_journal, axis=None).format({
+                    "Approx. Amount (₹)": "₹{:,.2f}",
+                    "Execution Price (₹)": "₹{:.2f}",
+                    "Current / Exit Price (₹)": "₹{:.2f}",
+                    "Realized / Live PnL (₹)": "₹{:+,.2f}",
+                    "Return %": "{:+0.2f}%"
+                }),
+                use_container_width=True
+            )
+        else:
+            st.info("No trade execution records available for the daily journal.")
     else:
         st.info("No predictions recorded yet.")
