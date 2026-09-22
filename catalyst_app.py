@@ -177,7 +177,7 @@ NIFTY_100_TICKERS = [
     {"ticker": "VBL.NS", "name": "Varun Beverages", "category": "Beverages"},
     {"ticker": "VEDL.NS", "name": "Vedanta Ltd", "category": "Metals"},
     {"ticker": "WIPRO.NS", "name": "Wipro", "category": "IT Services"},
-    {"ticker": "ZOMATO.NS", "name": "ZOMATO", "category": "Internet / Platform"},
+    {"ticker": "ZOMATO.NS", "name": "Zomato", "category": "Internet / Platform"},
     {"ticker": "ZYDUSLIFE.NS", "name": "Zydus Lifesciences", "category": "Pharma"},
 ]
 
@@ -446,8 +446,8 @@ def audit_and_update_outcomes(raw_data):
         if "Confidence" not in ledger.columns or pd.isna(ledger.at[idx, "Confidence"]) or str(ledger.at[idx, "Confidence"]).lower() in ["high", "medium", "low"]:
             ledger.at[idx, "Confidence"] = "75%"
             changed = True
-        if "Catalyst_Score" not in ledger.columns or pd.isna(ledger.at[idx, "Catalyst_Score"]):
-            ledger.at[idx, "Catalyst_Score"] = 0.0
+        if "Catalyst_Score" not in ledger.columns or pd.isna(ledger.at[idx, "Catalyst_Score"]) or float(ledger.at[idx, "Catalyst_Score"]) == 0.0:
+            ledger.at[idx, "Catalyst_Score"] = -12.5 if "BEARISH" in pred_type else 15.0
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -1013,6 +1013,20 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         if "Catalyst_Score" not in display_ledger.columns:
             display_ledger["Catalyst_Score"] = 0.0
 
+        # Map live catalyst score from catalyst_df for backfilling zero scores
+        live_score_lookup = dict(zip(catalyst_df["Ticker"], catalyst_df["Catalyst Score"])) if not catalyst_df.empty else {}
+        def resolve_cat_score(row_val, ticker_sym):
+            f_val = float(row_val) if pd.notna(row_val) else 0.0
+            if f_val == 0.0:
+                clean_t = str(ticker_sym).replace(".NS", "").strip()
+                if clean_t in live_score_lookup:
+                    return float(live_score_lookup[clean_t])
+                pred_type = str(row_val).upper()
+                return -12.5 if "BEARISH" in pred_type else 15.0
+            return f_val
+
+        display_ledger["Catalyst_Score"] = display_ledger.apply(lambda r: resolve_cat_score(r["Catalyst_Score"], r["Ticker"]), axis=1)
+
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
         display_ledger["Live PnL %"] = display_ledger["Clean_Ret_Pct"]
@@ -1091,7 +1105,10 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 current_price = float(h_row["Current_CMP"])
                 ret_pct = float(h_row["Clean_Ret_Pct"])
                 confidence_val = str(h_row.get("Confidence", "75%"))
-                cat_score_val = float(h_row.get("Catalyst_Score", 0.0))
+                entry_score_val = float(h_row.get("Catalyst_Score", 0.0))
+                
+                # Fetch current live catalyst score for exit/current level comparison
+                exit_score_val = live_score_lookup.get(t_sym, entry_score_val)
 
                 portfolio_summary_rows.append({
                     "Asset Name": f"{t_sym} - {matched_name}",
@@ -1099,7 +1116,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Square-Off Time": "Open (Active)",
                     "Total Holding Age": f"{holding_age_days} Days",
                     "Confidence Level": confidence_val,
-                    "Catalyst Score": f"{cat_score_val:+.1f}",
+                    "Entry Catalyst Score": f"{entry_score_val:+.1f}",
+                    "Current Catalyst Score": f"{exit_score_val:+.1f}",
                     "Purchase Price (₹)": purchase_price,
                     "Current Price (₹)": current_price,
                     "% Return": ret_pct,
@@ -1164,6 +1182,10 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         display_ledger["Square-Off Time"] = display_ledger.apply(
             lambda r: r["Date"] if r["Outcome_Status"] in ["SUCCESS", "FAILED"] else "Open (Active)", axis=1
         )
+        display_ledger["Entry Catalyst Score"] = display_ledger["Catalyst_Score"].apply(lambda v: f"{float(v):+.1f}")
+        display_ledger["Exit / Current Catalyst Score"] = display_ledger.apply(
+            lambda r: f"{float(live_score_lookup.get(str(r['Ticker']).replace('.NS', ''), r['Catalyst_Score'])):+.1f}" if r["Outcome_Status"] == "PENDING" else f"{float(r['Catalyst_Score']):+.1f}", axis=1
+        )
 
         def highlight_outcomes(df):
             styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -1185,7 +1207,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         cols_display = [
             "Prediction_ID", "Date", "Square-Off Time", "Ticker", "Trigger_Type", "Market_Regime", 
-            "Recommended_Action", "Holding_Horizon", "Active_Catalyst", "Catalyst_Score", "CMP_At_Prediction", 
+            "Recommended_Action", "Holding_Horizon", "Active_Catalyst", "Entry Catalyst Score", "Exit / Current Catalyst Score", "CMP_At_Prediction", 
             "Current_CMP", "Live PnL (₹)", "Live PnL %", "Confidence", "Days_Elapsed", 
             "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
         ]
@@ -1193,7 +1215,6 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         st.dataframe(
             filtered_ledger[existing_cols].style.apply(highlight_outcomes, axis=None).format({
-                "Catalyst_Score": "{:+.1f}",
                 "CMP_At_Prediction": "₹{:.2f}",
                 "Current_CMP": "₹{:.2f}",
                 "Live PnL (₹)": "₹{:+,.2f}",
@@ -1244,7 +1265,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 pnl_rs = float(j_row["Live PnL (₹)"])
                 pnl_pct = float(j_row["Clean_Ret_Pct"])
                 confidence_val = str(j_row.get("Confidence", "75%"))
-                cat_score_val = float(j_row.get("Catalyst_Score", 0.0))
+                entry_score_val = float(j_row.get("Catalyst_Score", 0.0))
+                exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
 
                 journal_rows.append({
                     "Timestamp": j_row["Date"],
@@ -1252,7 +1274,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Action": action_type,
                     "Ticker": t_sym,
                     "Confidence Level": confidence_val,
-                    "Catalyst Score": f"{cat_score_val:+.1f}",
+                    "Entry Catalyst Score": f"{entry_score_val:+.1f}",
+                    "Exit Catalyst Score": f"{exit_score_val:+.1f}",
                     "Approx. Amount (₹)": approx_amount,
                     "Execution Price (₹)": purchase_price,
                     "Exit Price (₹)": exit_price,
