@@ -2,9 +2,15 @@ name: Catalyst Daily Outcome Auditor
 
 on:
   schedule:
-    # 4:00 PM IST Mon-Fri (10:30 UTC)
-    - cron: '30 10 * * 1-5'
+    # 3:00 PM IST Mon-Fri (10:30 UTC)
+    - cron: '30 09 * * 1-5'
+  
   workflow_dispatch:
+    inputs:
+      trigger_source:
+        description: 'Trigger Source'
+        required: false
+        default: 'External_Cron'
 
 jobs:
   audit-and-commit:
