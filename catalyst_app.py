@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Added category fallback counts & timestamp batch deletion tools.
+# Remarks Updated: 2026-09-22 - Fixed date parsing alignment to ensure today's positions show correctly.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
