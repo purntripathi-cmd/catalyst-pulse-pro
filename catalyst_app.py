@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Added dynamic short-exit reversal safeguards & remarks tracking.
+# Remarks Updated: 2026-09-22 - Added filter counts & combined open/closed execution journal.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
@@ -493,10 +493,6 @@ def audit_and_update_outcomes(raw_data):
                 target_days = int(row.get("Target_Days", 8))
                 max_allowed_days = target_days + 2
 
-                # Dynamic Short-Exit Reversal Check (2026-09-22 change)
-                # If short trade score flips positive (> 0.0), trigger early reversal exit
-                is_short = not is_bullish
-                
                 if days >= 1:
                     if is_bullish:
                         if ret_pct >= row["Target_Return_Pct"]:
@@ -927,7 +923,25 @@ elif nav_choice == "📰 Exchange Disclosures & Media Feed":
     st.subheader("📰 Authentic Exchange Disclosures & Regulatory Stream")
     st.markdown(f"Total Filings Parsed in Batch: **{len(news_items_list)}**")
 
-    f_filter = st.selectbox("Filter Feed by Category:", ["All Filings", "Demergers & Mergers", "Order Wins & Capex", "Dividends & Buybacks", "Splits & Bonus", "Governance / Risk"])
+    # Calculate counts per group for dropdown
+    c_all = len(news_items_list)
+    c_demerge = len([i for i in news_items_list if i["group"] == "Demergers & Mergers"])
+    c_orders = len([i for i in news_items_list if i["group"] == "Order Wins & Capex"])
+    c_div = len([i for i in news_items_list if i["group"] == "Dividends & Buybacks"])
+    c_splits = len([i for i in news_items_list if i["group"] == "Splits & Bonus"])
+    c_gov = len([i for i in news_items_list if i["group"] == "Governance / Risk"])
+
+    f_options = {
+        f"All Filings ({c_all})": "All Filings",
+        f"Demergers & Mergers ({c_demerge})": "Demergers & Mergers",
+        f"Order Wins & Capex ({c_orders})": "Order Wins & Capex",
+        f"Dividends & Buybacks ({c_div})": "Dividends & Buybacks",
+        f"Splits & Bonus ({c_splits})": "Splits & Bonus",
+        f"Governance / Risk ({c_gov})": "Governance / Risk"
+    }
+
+    selected_f_label = st.selectbox("Filter Feed by Category:", list(f_options.keys()))
+    f_filter = f_options[selected_f_label]
 
     displayed_count = 0
     for item in news_items_list:
@@ -1322,5 +1336,80 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             )
         else:
             st.info("No closed or squared-off trade records available for the daily journal yet.")
+
+        # =====================================================================
+        # TABLE 4: Daily Purchase & Sale Execution Journal (Open + Closed Positions)
+        # =====================================================================
+        st.markdown("<div style='margin-top: 1.5rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### 📅 Daily Purchase & Sale Execution Journal (Open + Closed Positions)")
+        st.caption("Master chronological trade log tracking both active open holdings and historically completed positions.")
+
+        if not display_ledger.empty:
+            all_journal_rows = []
+            for _, a_row in display_ledger.iterrows():
+                t_sym = str(a_row["Ticker"]).replace(".NS", "")
+                status = str(a_row.get("Outcome_Status", "PENDING")).upper()
+                outlook = str(a_row.get("Predicted_Outlook", "")).upper()
+                
+                action_type = "BUY / LONG" if "BULLISH" in outlook else "SHORT / FADE"
+                
+                if status in ["SUCCESS", "FAILED"]:
+                    sq_status = f"Squared Off ({status})"
+                    sq_time = a_row["Date"]
+                else:
+                    sq_status = "Open / Active"
+                    sq_time = "Open (Active)"
+
+                purchase_price = float(a_row["CMP_At_Prediction"])
+                current_or_exit_price = float(a_row["Current_CMP"])
+                approx_amount = ASSUMED_TRANCHE_BUDGET
+                pnl_rs = float(a_row["Live PnL (₹)"])
+                pnl_pct = float(a_row["Clean_Ret_Pct"])
+                confidence_val = str(a_row.get("Confidence", "75%"))
+                entry_score_val = float(a_row.get("Catalyst_Score", 0.0))
+                exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
+                remarks_val = str(a_row.get("Remarks", "2026-09-22: Active/Closed sync."))
+
+                all_journal_rows.append({
+                    "Timestamp": a_row["Date"],
+                    "Square-Off Time": sq_time,
+                    "Action": action_type,
+                    "Ticker": t_sym,
+                    "Confidence Level": confidence_val,
+                    "Entry Catalyst Score": f"{entry_score_val:+.1f}",
+                    "Exit / Current Score": f"{exit_score_val:+.1f}",
+                    "Approx. Amount (₹)": approx_amount,
+                    "Execution Price (₹)": purchase_price,
+                    "Current / Exit Price (₹)": current_or_exit_price,
+                    "Square-Off Status": sq_status,
+                    "Live / Realized PnL (₹)": pnl_rs,
+                    "Return %": pnl_pct,
+                    "Remarks": remarks_val
+                })
+
+            all_journal_df = pd.DataFrame(all_journal_rows)
+            all_journal_df["Parsed_DT"] = pd.to_datetime(all_journal_df["Timestamp"].astype(str).str.replace(" IST", "").str.strip(), errors="coerce")
+            all_journal_df = all_journal_df.sort_values(by="Parsed_DT", ascending=False).drop(columns=["Parsed_DT"]).reset_index(drop=True)
+
+            def style_all_journal(df):
+                styles = pd.DataFrame("", index=df.index, columns=df.columns)
+                if "Live / Realized PnL (₹)" in df.columns:
+                    styles["Live / Realized PnL (₹)"] = df["Live / Realized PnL (₹)"].apply(
+                        lambda v: "color: #155724; font-weight: bold;" if v > 0 else ("color: #721c24; font-weight: bold;" if v < 0 else "")
+                    )
+                return styles
+
+            st.dataframe(
+                all_journal_df.style.apply(style_all_journal, axis=None).format({
+                    "Approx. Amount (₹)": "₹{:,.2f}",
+                    "Execution Price (₹)": "₹{:.2f}",
+                    "Current / Exit Price (₹)": "₹{:.2f}",
+                    "Live / Realized PnL (₹)": "₹{:+,.2f}",
+                    "Return %": "{:+0.2f}%"
+                }),
+                use_container_width=True
+            )
+        else:
+            st.info("No entries available for the combined trade log.")
     else:
         st.info("No predictions recorded yet.")
