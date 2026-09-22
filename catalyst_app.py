@@ -230,7 +230,6 @@ def fetch_corporate_catalysts(active_universe):
     news_items, matched_map, ticker_news_history = [], {}, {}
     known_syms = [x["ticker"].replace(".NS", "") for x in active_universe]
     
-    # Strict freshness filter: Ignore any RSS items older than 7 days
     cutoff_date = datetime.datetime.now(IST) - datetime.timedelta(days=7)
 
     for source_name, feed_url in RSS_FEEDS.items():
@@ -985,6 +984,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         display_ledger = audited_ledger.copy()
         if "Date" in display_ledger.columns:
+            display_ledger["Parsed_DT"] = pd.to_datetime(display_ledger["Date"].astype(str).str.replace(" IST", "").str.strip(), errors="coerce")
+            display_ledger = display_ledger.sort_values(by="Parsed_DT", ascending=False).drop(columns=["Parsed_DT"]).reset_index(drop=True)
             display_ledger["Date"] = display_ledger["Date"].apply(format_ledger_ist_date)
 
         ASSUMED_TRANCHE_BUDGET = 15000.0
@@ -1049,6 +1050,56 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             b2.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}", "Risk-Adjusted")
             b3.metric("Sortino Ratio", f"{sortino_ratio:.2f}", "Downside-Risk-Adjusted")
             b4.metric("Benchmark Alpha (α)", f"{alpha_vs_nifty:+.2f}%", "Outperformance" if alpha_vs_nifty > 0 else "Underperformance")
+
+        # Portfolio Holding Summary Table
+        st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### 💼 Active Portfolio Holdings & Holding Age Breakdown")
+        
+        active_holdings_df = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
+        if not active_holdings_df.empty:
+            portfolio_summary_rows = []
+            for _, h_row in active_holdings_df.iterrows():
+                t_sym = str(h_row["Ticker"]).replace(".NS", "")
+                matched_name = t_sym
+                for u_item in ACTIVE_UNIVERSE:
+                    if u_item["ticker"].replace(".NS", "") == t_sym:
+                        matched_name = u_item["name"]
+                        break
+                
+                raw_dt_str = str(h_row["Date"]).replace(" IST", "").strip()
+                try:
+                    holding_dt = pd.to_datetime(raw_dt_str)
+                    holding_age_days = (datetime.datetime.now(IST).tz_localize(None) - holding_dt.tz_localize(None)).days
+                except Exception:
+                    holding_age_days = int(h_row.get("Days_Elapsed", 0))
+
+                purchase_price = float(h_row["CMP_At_Prediction"])
+                current_price = float(h_row["Current_CMP"])
+                ret_pct = float(h_row["Clean_Ret_Pct"])
+
+                portfolio_summary_rows.append({
+                    "Asset Name": f"{t_sym} - {matched_name}",
+                    "Total Holding Age": f"{holding_age_days} Days",
+                    "Purchase Price (₹)": purchase_price,
+                    "Current Price (₹)": current_price,
+                    "% Return": ret_pct,
+                    "Live PnL (₹)": float(h_row["Live PnL (₹)"])
+                })
+
+            port_summary_df = pd.DataFrame(portfolio_summary_rows)
+            st.dataframe(
+                port_summary_df.style.format({
+                    "Purchase Price (₹)": "₹{:.2f}",
+                    "Current Price (₹)": "₹{:.2f}",
+                    "% Return": "{:+0.2f}%",
+                    "Live PnL (₹)": "₹{:+,.2f}"
+                }),
+                use_container_width=True
+            )
+        else:
+            st.info("No active holdings currently in portfolio.")
+
+        st.markdown("<hr style='margin-top: 0.6rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
 
         st.markdown("<div style='margin-bottom: 0.4rem;'></div>", unsafe_allow_html=True)
 
