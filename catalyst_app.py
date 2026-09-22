@@ -1225,12 +1225,14 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 approx_amount = ASSUMED_TRANCHE_BUDGET
                 pnl_rs = float(j_row["Live PnL (₹)"])
                 pnl_pct = float(j_row["Clean_Ret_Pct"])
+                confidence_level = j_row.get("Confidence", "High")
 
                 journal_rows.append({
                     "Timestamp": j_row["Date"],
                     "Square-Off Time": sq_time,
                     "Action": action_type,
                     "Ticker": t_sym,
+                    "Confidence Level": confidence_level,
                     "Approx. Amount (₹)": approx_amount,
                     "Execution Price (₹)": purchase_price,
                     "Exit Price (₹)": exit_price,
