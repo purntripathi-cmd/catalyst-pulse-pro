@@ -388,6 +388,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
         
         horizon_val = str(row.get("Dynamic Horizon", "🎯 Tactical Swing (1-2 Weeks)"))
         target_days_val = int(row.get("Target Days", 8))
+        prob_1w_val = int(row.get("P(1W) Drift %", 75))
         
         new_records.append({
             "Prediction_ID": p_id,
@@ -401,7 +402,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Target_Days": target_days_val,
             "Market_Regime": current_regime_label,
             "Trigger_Type": trigger_type,
-            "Confidence": row.get("Confidence", "High"),
+            "Confidence": f"{prob_1w_val}%",
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
             "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
             "Days_Elapsed": 0,
@@ -439,6 +440,9 @@ def audit_and_update_outcomes(raw_data):
             changed = True
         if "Market_Regime" not in ledger.columns or pd.isna(ledger.at[idx, "Market_Regime"]):
             ledger.at[idx, "Market_Regime"] = "🟡 Sideways / Rangebound"
+            changed = True
+        if "Confidence" not in ledger.columns or pd.isna(ledger.at[idx, "Confidence"]) or str(ledger.at[idx, "Confidence"]).lower() in ["high", "medium", "low"]:
+            ledger.at[idx, "Confidence"] = "75%"
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -999,6 +1003,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             display_ledger["Trigger_Type"] = "MANUAL_WEB_UI"
         if "Market_Regime" not in display_ledger.columns:
             display_ledger["Market_Regime"] = "🟡 Sideways / Rangebound"
+        if "Confidence" not in display_ledger.columns:
+            display_ledger["Confidence"] = "75%"
 
         display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
@@ -1077,12 +1083,14 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 purchase_price = float(h_row["CMP_At_Prediction"])
                 current_price = float(h_row["Current_CMP"])
                 ret_pct = float(h_row["Clean_Ret_Pct"])
+                confidence_val = str(h_row.get("Confidence", "75%"))
 
                 portfolio_summary_rows.append({
                     "Asset Name": f"{t_sym} - {matched_name}",
                     "Purchase Timestamp": raw_dt_str,
                     "Square-Off Time": "Open (Active)",
                     "Total Holding Age": f"{holding_age_days} Days",
+                    "Confidence Level": confidence_val,
                     "Purchase Price (₹)": purchase_price,
                     "Current Price (₹)": current_price,
                     "% Return": ret_pct,
@@ -1225,14 +1233,14 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 approx_amount = ASSUMED_TRANCHE_BUDGET
                 pnl_rs = float(j_row["Live PnL (₹)"])
                 pnl_pct = float(j_row["Clean_Ret_Pct"])
-                confidence_level = j_row.get("Confidence", "High")
+                confidence_val = str(j_row.get("Confidence", "75%"))
 
                 journal_rows.append({
                     "Timestamp": j_row["Date"],
                     "Square-Off Time": sq_time,
                     "Action": action_type,
                     "Ticker": t_sym,
-                    "Confidence Level": confidence_level,
+                    "Confidence Level": confidence_val,
                     "Approx. Amount (₹)": approx_amount,
                     "Execution Price (₹)": purchase_price,
                     "Exit Price (₹)": exit_price,
