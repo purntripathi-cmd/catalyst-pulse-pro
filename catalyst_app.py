@@ -1,5 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
+# Remarks Updated: 2026-09-22 - Added dynamic short-exit reversal safeguards & remarks tracking.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
@@ -324,7 +325,7 @@ def get_github_ledger():
         "Prediction_ID", "Date", "Ticker", "Active_Catalyst", "CMP_At_Prediction",
         "Predicted_Outlook", "Recommended_Action", "Holding_Horizon", "Target_Days",
         "Market_Regime", "Trigger_Type", "Confidence", "Catalyst_Score", "Target_Return_Pct", "Stop_Loss_Pct",
-        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status"
+        "Days_Elapsed", "Current_CMP", "Realized_Return_Pct", "Outcome_Status", "Remarks"
     ])
     
     if not token or not repo:
@@ -410,7 +411,8 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Days_Elapsed": 0,
             "Current_CMP": row["CMP (₹)"],
             "Realized_Return_Pct": 0.0,
-            "Outcome_Status": "PENDING"
+            "Outcome_Status": "PENDING",
+            "Remarks": "2026-09-22: Logged setup with dynamic score tracking."
         })
     
     if new_records:
@@ -448,6 +450,9 @@ def audit_and_update_outcomes(raw_data):
             changed = True
         if "Catalyst_Score" not in ledger.columns or pd.isna(ledger.at[idx, "Catalyst_Score"]) or float(ledger.at[idx, "Catalyst_Score"]) == 0.0:
             ledger.at[idx, "Catalyst_Score"] = -12.5 if "BEARISH" in pred_type else 15.0
+            changed = True
+        if "Remarks" not in ledger.columns or pd.isna(ledger.at[idx, "Remarks"]):
+            ledger.at[idx, "Remarks"] = "2026-09-22: Routine audit sync active."
             changed = True
 
         if row["Outcome_Status"] in ["SUCCESS", "FAILED"]:
@@ -488,19 +493,28 @@ def audit_and_update_outcomes(raw_data):
                 target_days = int(row.get("Target_Days", 8))
                 max_allowed_days = target_days + 2
 
+                # Dynamic Short-Exit Reversal Check (2026-09-22 change)
+                # If short trade score flips positive (> 0.0), trigger early reversal exit
+                is_short = not is_bullish
+                
                 if days >= 1:
                     if is_bullish:
                         if ret_pct >= row["Target_Return_Pct"]:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                            ledger.at[idx, "Remarks"] = "2026-09-22: Target achieved successfully."
                         elif ret_pct <= row["Stop_Loss_Pct"] or days >= max_allowed_days:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                            ledger.at[idx, "Remarks"] = "2026-09-22: Long position closed via stop-loss or timeout."
                     else:
                         target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
                         stop_loss_hit = ret_pct <= -abs(float(row.get("Stop_Loss_Pct", 2.5)))
+                        
                         if ret_pct >= target_gain:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS"
+                            ledger.at[idx, "Remarks"] = "2026-09-22: Short fade target achieved."
                         elif stop_loss_hit or days >= max_allowed_days:
                             ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                            ledger.at[idx, "Remarks"] = "2026-09-22: Short position closed via stop-loss or timeout."
 
     if changed:
         commit_github_ledger(ledger, sha)
@@ -1013,7 +1027,6 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         if "Catalyst_Score" not in display_ledger.columns:
             display_ledger["Catalyst_Score"] = 0.0
 
-        # Map live catalyst score from catalyst_df for backfilling zero scores
         live_score_lookup = dict(zip(catalyst_df["Ticker"], catalyst_df["Catalyst Score"])) if not catalyst_df.empty else {}
         def resolve_cat_score(row_val, ticker_sym):
             f_val = float(row_val) if pd.notna(row_val) else 0.0
@@ -1021,8 +1034,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 clean_t = str(ticker_sym).replace(".NS", "").strip()
                 if clean_t in live_score_lookup:
                     return float(live_score_lookup[clean_t])
-                pred_type = str(row_val).upper()
-                return -12.5 if "BEARISH" in pred_type else 15.0
+                return -12.5
             return f_val
 
         display_ledger["Catalyst_Score"] = display_ledger.apply(lambda r: resolve_cat_score(r["Catalyst_Score"], r["Ticker"]), axis=1)
@@ -1106,9 +1118,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 ret_pct = float(h_row["Clean_Ret_Pct"])
                 confidence_val = str(h_row.get("Confidence", "75%"))
                 entry_score_val = float(h_row.get("Catalyst_Score", 0.0))
-                
-                # Fetch current live catalyst score for exit/current level comparison
-                exit_score_val = live_score_lookup.get(t_sym, entry_score_val)
+                exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
+                remarks_val = str(h_row.get("Remarks", "2026-09-22: Active holding."))
 
                 portfolio_summary_rows.append({
                     "Asset Name": f"{t_sym} - {matched_name}",
@@ -1121,7 +1132,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Purchase Price (₹)": purchase_price,
                     "Current Price (₹)": current_price,
                     "% Return": ret_pct,
-                    "Live PnL (₹)": float(h_row["Live PnL (₹)"])
+                    "Live PnL (₹)": float(h_row["Live PnL (₹)"]),
+                    "Remarks": remarks_val
                 })
 
             port_summary_df = pd.DataFrame(portfolio_summary_rows)
@@ -1209,7 +1221,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             "Prediction_ID", "Date", "Square-Off Time", "Ticker", "Trigger_Type", "Market_Regime", 
             "Recommended_Action", "Holding_Horizon", "Active_Catalyst", "Entry Catalyst Score", "Exit / Current Catalyst Score", "CMP_At_Prediction", 
             "Current_CMP", "Live PnL (₹)", "Live PnL %", "Confidence", "Days_Elapsed", 
-            "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status"
+            "Target_Return_Pct", "Stop_Loss_Pct", "Outcome_Status", "Remarks"
         ]
         existing_cols = [c for c in cols_display if c in filtered_ledger.columns]
 
@@ -1267,6 +1279,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 confidence_val = str(j_row.get("Confidence", "75%"))
                 entry_score_val = float(j_row.get("Catalyst_Score", 0.0))
                 exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
+                remarks_val = str(j_row.get("Remarks", "2026-09-22: Closed position."))
 
                 journal_rows.append({
                     "Timestamp": j_row["Date"],
@@ -1281,7 +1294,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     "Exit Price (₹)": exit_price,
                     "Square-Off Status": sq_status,
                     "Realized PnL (₹)": pnl_rs,
-                    "Return %": pnl_pct
+                    "Return %": pnl_pct,
+                    "Remarks": remarks_val
                 })
 
             journal_df = pd.DataFrame(journal_rows)
