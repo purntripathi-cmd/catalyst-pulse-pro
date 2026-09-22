@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Enhanced GitHub commit error diagnostics & sync logging.
+# Remarks Updated: 2026-09-22 - Added manual sync commit button & strict IST timezone normalization.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
@@ -260,7 +260,7 @@ def fetch_corporate_catalysts(active_universe):
 
                 item = {
                     "source": source_name, "title": title, "summary": summary,
-                    "link": entry.get("link", "#"), "published": entry.get("published", str(datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))),
+                    "link": entry.get("link", "#"), "published": entry.get("published", str(datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))),
                     "catalyst": detected_catalyst, "impact": impact, "p1w": p1, "p2w": p2, "group": grp, "matched": matched
                 }
                 news_items.append(item)
@@ -363,7 +363,7 @@ def commit_github_ledger(updated_df, sha=None):
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
     
     payload = {
-        "message": f"Ledger update [{datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}]",
+        "message": f"Ledger update [{datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S IST')}]",
         "content": b64_content
     }
     if sha:
@@ -371,6 +371,21 @@ def commit_github_ledger(updated_df, sha=None):
 
     res = requests.put(url, headers=headers, data=json.dumps(payload))
     return res.status_code in [200, 201]
+
+def normalize_to_ist(dt_val):
+    if pd.isna(dt_val) or str(dt_val).strip() == "" or str(dt_val).lower() == "nat":
+        return datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    raw_str = str(dt_val).replace(" IST", "").strip()
+    try:
+        dt = pd.to_datetime(raw_str)
+        if dt.tzinfo is None:
+            # Assume UTC or naive local and localize to IST cleanly
+            dt = dt.tz_localize("UTC").tz_convert(IST)
+        else:
+            dt = dt.tz_convert(IST)
+        return dt.strftime("%Y-%m-%d %H:%M:%S IST")
+    except Exception:
+        return str(dt_val) + (" IST" if "IST" not in str(dt_val) else "")
 
 def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI", current_regime_label="🟡 Sideways"):
     ledger, sha = get_github_ledger()
@@ -412,7 +427,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Current_CMP": row["CMP (₹)"],
             "Realized_Return_Pct": 0.0,
             "Outcome_Status": "PENDING",
-            "Remarks": "2026-09-22: Logged setup with dynamic score tracking."
+            "Remarks": "2026-09-22: Logged setup with IST sync."
         })
     
     if new_records:
@@ -430,6 +445,13 @@ def audit_and_update_outcomes(raw_data):
     for idx, row in ledger.iterrows():
         pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
         
+        # Normalize existing dates to IST
+        current_date_val = str(row.get("Date", ""))
+        normalized_dt = normalize_to_ist(current_date_val)
+        if current_date_val != normalized_dt:
+            ledger.at[idx, "Date"] = normalized_dt
+            changed = True
+
         if "Recommended_Action" not in ledger.columns or pd.isna(ledger.at[idx, "Recommended_Action"]):
             ledger.at[idx, "Recommended_Action"] = "🟢 BUY / ACCUMULATE" if "BULLISH" in pred_type else "🔴 SHORT / FADE (SELL)"
             changed = True
@@ -985,6 +1007,15 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             else:
                 st.info("Today's setups are already recorded in the ledger.")
 
+    with col_btn2:
+        if st.button("📥 Force Sync & Commit to GitHub", use_container_width=True, help="Manually push current session ledger updates to GitHub CSV"):
+            _, sha = get_github_ledger()
+            if commit_github_ledger(audited_ledger, sha):
+                st.success("Successfully synced and committed ledger to GitHub repository!")
+                st.rerun()
+            else:
+                st.error("GitHub commit failed. Check your GITHUB_PAT and GITHUB_REPO secrets.")
+
     # Timestamp Batch Deletion Tool for All Sections of Tab 4
     with st.expander("🗑️ Batch Delete Executions by Date & Timestamp", expanded=False):
         st.caption("Select specific execution timestamps to permanently purge all positions recorded at that exact date and time.")
@@ -1005,25 +1036,11 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                             st.error("Failed to commit batch deletion to GitHub.")
 
     if not audited_ledger.empty:
-        def format_ledger_ist_date(d_val):
-            if pd.isna(d_val) or str(d_val).strip() == "":
-                return "Pending"
-            try:
-                raw = str(d_val).replace(" IST", "").strip()
-                dt = pd.to_datetime(raw)
-                if dt.tzinfo is None:
-                    dt = dt.tz_localize("UTC").tz_convert(IST)
-                else:
-                    dt = dt.tz_convert(IST)
-                return dt.strftime("%Y-%m-%d %H:%M:%S IST")
-            except Exception:
-                return str(d_val)
-
         display_ledger = audited_ledger.copy()
         if "Date" in display_ledger.columns:
+            display_ledger["Date"] = display_ledger["Date"].apply(normalize_to_ist)
             display_ledger["Parsed_DT"] = pd.to_datetime(display_ledger["Date"].astype(str).str.replace(" IST", "").str.strip(), errors="coerce")
             display_ledger = display_ledger.sort_values(by="Parsed_DT", ascending=False).drop(columns=["Parsed_DT"]).reset_index(drop=True)
-            display_ledger["Date"] = display_ledger["Date"].apply(format_ledger_ist_date)
 
         ASSUMED_TRANCHE_BUDGET = 15000.0
 
