@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Fixed date parsing alignment to ensure today's positions show correctly.
+# Remarks Updated: 2026-09-22 - Enhanced GitHub commit error diagnostics & sync logging.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
