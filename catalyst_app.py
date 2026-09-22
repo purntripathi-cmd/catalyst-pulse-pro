@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Added filter counts & combined open/closed execution journal.
+# Remarks Updated: 2026-09-22 - Added category fallback counts & timestamp batch deletion tools.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
@@ -246,7 +246,7 @@ def fetch_corporate_catalysts(active_universe):
                 summary = clean_html_text(entry.get("summary", ""))
                 full_text = f"{title} {summary}"
 
-                detected_catalyst, impact, p1, p2, grp = "⚡ General Market Notice", 1.0, 50, 50, "General"
+                detected_catalyst, impact, p1, p2, grp = "⚡ General Market Notice", 1.0, 50, 50, "General Market Notice"
                 for cat_name, meta in CATALYST_RULES.items():
                     if meta["regex"].search(full_text):
                         detected_catalyst = cat_name
@@ -555,7 +555,7 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
             base_p2 = cat_info["p2w"]
         else:
             cat_name = "⚡ Technical Baseline"
-            cat_group = "Baseline"
+            cat_group = "General Market Notice"
             impact_mult = 1.0
             base_p1 = 50
             base_p2 = 50
@@ -923,13 +923,13 @@ elif nav_choice == "📰 Exchange Disclosures & Media Feed":
     st.subheader("📰 Authentic Exchange Disclosures & Regulatory Stream")
     st.markdown(f"Total Filings Parsed in Batch: **{len(news_items_list)}**")
 
-    # Calculate counts per group for dropdown
     c_all = len(news_items_list)
     c_demerge = len([i for i in news_items_list if i["group"] == "Demergers & Mergers"])
     c_orders = len([i for i in news_items_list if i["group"] == "Order Wins & Capex"])
     c_div = len([i for i in news_items_list if i["group"] == "Dividends & Buybacks"])
     c_splits = len([i for i in news_items_list if i["group"] == "Splits & Bonus"])
     c_gov = len([i for i in news_items_list if i["group"] == "Governance / Risk"])
+    c_gen = len([i for i in news_items_list if i["group"] == "General Market Notice"])
 
     f_options = {
         f"All Filings ({c_all})": "All Filings",
@@ -937,7 +937,8 @@ elif nav_choice == "📰 Exchange Disclosures & Media Feed":
         f"Order Wins & Capex ({c_orders})": "Order Wins & Capex",
         f"Dividends & Buybacks ({c_div})": "Dividends & Buybacks",
         f"Splits & Bonus ({c_splits})": "Splits & Bonus",
-        f"Governance / Risk ({c_gov})": "Governance / Risk"
+        f"Governance / Risk ({c_gov})": "Governance / Risk",
+        f"General Market Notice ({c_gen})": "General Market Notice"
     }
 
     selected_f_label = st.selectbox("Filter Feed by Category:", list(f_options.keys()))
@@ -984,24 +985,24 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             else:
                 st.info("Today's setups are already recorded in the ledger.")
 
-    with st.expander("🛠️ Manage & Delete Test Runs / Selected Entries", expanded=False):
-        st.caption("Select specific test predictions to permanently purge from the GitHub repository ledger.")
-        if not audited_ledger.empty and "Prediction_ID" in audited_ledger.columns:
-            preds_to_delete = st.multiselect(
-                "Select Prediction IDs to Delete:",
-                options=audited_ledger["Prediction_ID"].tolist()
-            )
-            del_c1, del_c2 = st.columns([1, 4])
-            with del_c1:
-                if st.button("🗑️ Delete Selected", type="primary", use_container_width=True):
-                    if preds_to_delete:
-                        cleaned_df = audited_ledger[~audited_ledger["Prediction_ID"].isin(preds_to_delete)].copy()
+    # Timestamp Batch Deletion Tool for All Sections of Tab 4
+    with st.expander("🗑️ Batch Delete Executions by Date & Timestamp", expanded=False):
+        st.caption("Select specific execution timestamps to permanently purge all positions recorded at that exact date and time.")
+        if not audited_ledger.empty and "Date" in audited_ledger.columns:
+            unique_timestamps = sorted(audited_ledger["Date"].unique().tolist(), reverse=True)
+            ts_to_purge = st.selectbox("Select Execution Timestamp to Clear:", options=unique_timestamps)
+            
+            del_btn_col1, _ = st.columns([1, 4])
+            with del_btn_col1:
+                if st.button("🚨 Purge Batch Timestamp", type="primary", use_container_width=True):
+                    if ts_to_purge:
+                        cleaned_df = audited_ledger[audited_ledger["Date"] != ts_to_purge].copy()
                         _, sha = get_github_ledger()
                         if commit_github_ledger(cleaned_df, sha):
-                            st.success(f"Purged {len(preds_to_delete)} records permanently from GitHub ledger.")
+                            st.success(f"Successfully purged all positions executed at {ts_to_purge}!")
                             st.rerun()
                         else:
-                            st.error("Failed to commit ledger changes to GitHub.")
+                            st.error("Failed to commit batch deletion to GitHub.")
 
     if not audited_ledger.empty:
         def format_ledger_ist_date(d_val):
@@ -1338,78 +1339,71 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             st.info("No closed or squared-off trade records available for the daily journal yet.")
 
         # =====================================================================
-        # TABLE 4: Daily Purchase & Sale Execution Journal (Open + Closed Positions)
+        # TABLE 4: Daily Purchase & Sale Execution Journal (Open Positions Only)
         # =====================================================================
         st.markdown("<div style='margin-top: 1.5rem;'></div>", unsafe_allow_html=True)
-        st.markdown("##### 📅 Daily Purchase & Sale Execution Journal (Open + Closed Positions)")
-        st.caption("Master chronological trade log tracking both active open holdings and historically completed positions.")
+        st.markdown("##### 📅 Daily Purchase & Sale Execution Journal (Open Positions Only)")
+        st.caption("Chronological record tracking active open holdings currently pending square-off.")
 
-        if not display_ledger.empty:
-            all_journal_rows = []
-            for _, a_row in display_ledger.iterrows():
-                t_sym = str(a_row["Ticker"]).replace(".NS", "")
-                status = str(a_row.get("Outcome_Status", "PENDING")).upper()
-                outlook = str(a_row.get("Predicted_Outlook", "")).upper()
-                
+        open_ledger_df = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
+
+        if not open_ledger_df.empty:
+            open_rows = []
+            for _, o_row in open_ledger_df.iterrows():
+                t_sym = str(o_row["Ticker"]).replace(".NS", "")
+                outlook = str(o_row.get("Predicted_Outlook", "")).upper()
                 action_type = "BUY / LONG" if "BULLISH" in outlook else "SHORT / FADE"
-                
-                if status in ["SUCCESS", "FAILED"]:
-                    sq_status = f"Squared Off ({status})"
-                    sq_time = a_row["Date"]
-                else:
-                    sq_status = "Open / Active"
-                    sq_time = "Open (Active)"
 
-                purchase_price = float(a_row["CMP_At_Prediction"])
-                current_or_exit_price = float(a_row["Current_CMP"])
+                purchase_price = float(o_row["CMP_At_Prediction"])
+                current_price = float(o_row["Current_CMP"])
                 approx_amount = ASSUMED_TRANCHE_BUDGET
-                pnl_rs = float(a_row["Live PnL (₹)"])
-                pnl_pct = float(a_row["Clean_Ret_Pct"])
-                confidence_val = str(a_row.get("Confidence", "75%"))
-                entry_score_val = float(a_row.get("Catalyst_Score", 0.0))
+                pnl_rs = float(o_row["Live PnL (₹)"])
+                pnl_pct = float(o_row["Clean_Ret_Pct"])
+                confidence_val = str(o_row.get("Confidence", "75%"))
+                entry_score_val = float(o_row.get("Catalyst_Score", 0.0))
                 exit_score_val = float(live_score_lookup.get(t_sym, entry_score_val))
-                remarks_val = str(a_row.get("Remarks", "2026-09-22: Active/Closed sync."))
+                remarks_val = str(o_row.get("Remarks", "2026-09-22: Active open position."))
 
-                all_journal_rows.append({
-                    "Timestamp": a_row["Date"],
-                    "Square-Off Time": sq_time,
+                open_rows.append({
+                    "Timestamp": o_row["Date"],
+                    "Square-Off Time": "Open (Active)",
                     "Action": action_type,
                     "Ticker": t_sym,
                     "Confidence Level": confidence_val,
                     "Entry Catalyst Score": f"{entry_score_val:+.1f}",
-                    "Exit / Current Score": f"{exit_score_val:+.1f}",
+                    "Current Catalyst Score": f"{exit_score_val:+.1f}",
                     "Approx. Amount (₹)": approx_amount,
                     "Execution Price (₹)": purchase_price,
-                    "Current / Exit Price (₹)": current_or_exit_price,
-                    "Square-Off Status": sq_status,
-                    "Live / Realized PnL (₹)": pnl_rs,
+                    "Current Price (₹)": current_price,
+                    "Square-Off Status": "Open / Active",
+                    "Live PnL (₹)": pnl_rs,
                     "Return %": pnl_pct,
                     "Remarks": remarks_val
                 })
 
-            all_journal_df = pd.DataFrame(all_journal_rows)
-            all_journal_df["Parsed_DT"] = pd.to_datetime(all_journal_df["Timestamp"].astype(str).str.replace(" IST", "").str.strip(), errors="coerce")
-            all_journal_df = all_journal_df.sort_values(by="Parsed_DT", ascending=False).drop(columns=["Parsed_DT"]).reset_index(drop=True)
+            open_df = pd.DataFrame(open_rows)
+            open_df["Parsed_DT"] = pd.to_datetime(open_df["Timestamp"].astype(str).str.replace(" IST", "").str.strip(), errors="coerce")
+            open_df = open_df.sort_values(by="Parsed_DT", ascending=False).drop(columns=["Parsed_DT"]).reset_index(drop=True)
 
-            def style_all_journal(df):
+            def style_open(df):
                 styles = pd.DataFrame("", index=df.index, columns=df.columns)
-                if "Live / Realized PnL (₹)" in df.columns:
-                    styles["Live / Realized PnL (₹)"] = df["Live / Realized PnL (₹)"].apply(
+                if "Live PnL (₹)" in df.columns:
+                    styles["Live PnL (₹)"] = df["Live PnL (₹)"].apply(
                         lambda v: "color: #155724; font-weight: bold;" if v > 0 else ("color: #721c24; font-weight: bold;" if v < 0 else "")
                     )
                 return styles
 
             st.dataframe(
-                all_journal_df.style.apply(style_all_journal, axis=None).format({
+                open_df.style.apply(style_open, axis=None).format({
                     "Approx. Amount (₹)": "₹{:,.2f}",
                     "Execution Price (₹)": "₹{:.2f}",
-                    "Current / Exit Price (₹)": "₹{:.2f}",
-                    "Live / Realized PnL (₹)": "₹{:+,.2f}",
+                    "Current Price (₹)": "₹{:.2f}",
+                    "Live PnL (₹)": "₹{:+,.2f}",
                     "Return %": "{:+0.2f}%"
                 }),
                 use_container_width=True
             )
         else:
-            st.info("No entries available for the combined trade log.")
+            st.info("No open positions currently active in the execution journal.")
     else:
         st.info("No predictions recorded yet.")
