@@ -1,6 +1,6 @@
 # =====================================================================
 # Section 0: Imports, Logging & High-Density UI CSS
-# Remarks Updated: 2026-09-22 - Added manual sync commit button & strict IST timezone normalization.
+# Remarks Updated: 2026-09-22 - Corrected timezone normalization to prevent UTC-to-IST date shifting.
 # =====================================================================
 import datetime
 from zoneinfo import ZoneInfo
@@ -378,10 +378,8 @@ def normalize_to_ist(dt_val):
     raw_str = str(dt_val).replace(" IST", "").strip()
     try:
         dt = pd.to_datetime(raw_str)
-        if dt.tzinfo is None:
-            # Assume UTC or naive local and localize to IST cleanly
-            dt = dt.tz_localize("UTC").tz_convert(IST)
-        else:
+        # If timestamp is already naive or localized, treat it as exact IST local time without double-shifting
+        if dt.tzinfo is not None:
             dt = dt.tz_convert(IST)
         return dt.strftime("%Y-%m-%d %H:%M:%S IST")
     except Exception:
@@ -427,7 +425,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Current_CMP": row["CMP (₹)"],
             "Realized_Return_Pct": 0.0,
             "Outcome_Status": "PENDING",
-            "Remarks": "2026-09-22: Logged setup with IST sync."
+            "Remarks": "2026-09-22: Logged setup with direct IST timestamp."
         })
     
     if new_records:
@@ -445,7 +443,6 @@ def audit_and_update_outcomes(raw_data):
     for idx, row in ledger.iterrows():
         pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
         
-        # Normalize existing dates to IST
         current_date_val = str(row.get("Date", ""))
         normalized_dt = normalize_to_ist(current_date_val)
         if current_date_val != normalized_dt:
