@@ -113,17 +113,24 @@ NIFTY_UNIVERSE = [
 ]
 
 CATALYST_RULES = {
-    "Demerger / Merger Unlock": (re.compile(r"(?:demerger|spin-?off|scheme of arrangement|merger)", re.IGNORECASE), 1.35, 72),
+    "Demerger / Merger Unlock": (re.compile(r"(?:demerger|spin-?off|scheme of arrangement|merger|amalgamation)", re.IGNORECASE), 1.35, 72),
     "Mega Order Win / Contract": (re.compile(r"(?:bagged|awarded|receives?|secures?|wins?)\s+(?:an?\s+)?(?:order|contract|project)", re.IGNORECASE), 1.20, 66),
-    "Capex / Plant Expansion": (re.compile(r"(?:commercial production|capacity expansion|capex|new plant)", re.IGNORECASE), 1.10, 62),
+    "Capex / Plant Expansion": (re.compile(r"(?:commercial production|capacity expansion|capex|new plant|new facility)", re.IGNORECASE), 1.10, 62),
+    "USFDA Inspection / EIR Clearance": (re.compile(r"(?:usfda|establishment inspection report|eir|form 483|warning letter|zero observations|v-?a-?i)", re.IGNORECASE), 1.30, 70),
+    "Credit Rating Upgrade / Revision": (re.compile(r"(?:crisil|icra|care ratings?|india ratings?).*(?:upgrade|revises? outlook|reaffirms?|positive)", re.IGNORECASE), 1.15, 64),
+    "SEBI SAST Promoter Pledging Revocation": (re.compile(r"(?:pledge revocation|release of pledge|promoter pledge|encumbrance)", re.IGNORECASE), 1.25, 68),
+    "QIP / Institutional Placement": (re.compile(r"(?:qip|qualified institutional placement|preferential allotment|block deal)", re.IGNORECASE), 1.18, 65),
+    "Strategic Joint Venture": (re.compile(r"(?:strategic partnership|joint venture|mou signed|collaborat)", re.IGNORECASE), 1.12, 63),
     "Dividend & Buyback": (re.compile(r"(?:interim dividend|final dividend|special dividend|buyback)", re.IGNORECASE), 0.85, 46),
     "Bonus / Split / Rights Issue": (re.compile(r"(?:sub-division|split of face value|bonus issue|bonus shares)", re.IGNORECASE), 0.70, 40),
+    "Regulatory / Governance Warning": (re.compile(r"(?:resignation of auditor|cbi|ed search|seizure|enforcement|show cause notice|fraud)", re.IGNORECASE), -1.60, 22),
 }
 
 RSS_FEEDS = [
-    "https://beta.bseindia.com/rss-feed.html",
+    "https://news.google.com/rss/search?q=NSE+BSE+corporate+announcements+OR+results+OR+order+win+OR+FDA+OR+merger&hl=en-IN&gl=IN&ceid=IN:en",
     "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "https://www.moneycontrol.com/rss/MCtopnews.xml"
+    "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "https://www.business-standard.com/rss/markets-106.rss"
 ]
 
 # Ingest RSS

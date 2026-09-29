@@ -195,6 +195,26 @@ CATALYST_RULES = {
         "regex": re.compile(r"(?:commercial production|capacity expansion|capex|new facility|new plant|manufacturing unit)", re.IGNORECASE),
         "impact_mult": 1.10, "base_p1w": 62, "base_p2w": 66, "group": "Order Wins & Capex"
     },
+    "USFDA Inspection / EIR Clearance": {
+        "regex": re.compile(r"(?:usfda|establishment inspection report|eir|form 483|warning letter|import alert|inspection completed|zero observations|v-?a-?i)", re.IGNORECASE),
+        "impact_mult": 1.30, "base_p1w": 70, "base_p2w": 75, "group": "Pharma & Approvals"
+    },
+    "Credit Rating Upgrade / Revision": {
+        "regex": re.compile(r"(?:crisil|icra|care ratings?|india ratings?).*(?:upgrade|revises? outlook|reaffirms?|positive outlook|stable)", re.IGNORECASE),
+        "impact_mult": 1.15, "base_p1w": 64, "base_p2w": 68, "group": "Credit & Rating"
+    },
+    "SEBI SAST Promoter Pledging Revocation": {
+        "regex": re.compile(r"(?:pledge revocation|release of pledge|promoter pledge|encumbrance|sast regulation)", re.IGNORECASE),
+        "impact_mult": 1.25, "base_p1w": 68, "base_p2w": 72, "group": "Governance & Promoters"
+    },
+    "QIP / Institutional Placement": {
+        "regex": re.compile(r"(?:qip|qualified institutional placement|preferential allotment|block deal|bulk deal|marquee investor)", re.IGNORECASE),
+        "impact_mult": 1.18, "base_p1w": 65, "base_p2w": 69, "group": "Capital & Stake"
+    },
+    "Strategic Joint Venture / Partnership": {
+        "regex": re.compile(r"(?:strategic partnership|joint venture|mou signed|collaborat|technology transfer)", re.IGNORECASE),
+        "impact_mult": 1.12, "base_p1w": 63, "base_p2w": 67, "group": "Strategic Alliances"
+    },
     "Dividend & Buyback": {
         "regex": re.compile(r"(?:interim dividend|final dividend|special dividend|dividend of rs|buyback|share repurchase)", re.IGNORECASE),
         "impact_mult": 0.85, "base_p1w": 46, "base_p2w": 42, "group": "Dividends & Buybacks"
@@ -210,10 +230,35 @@ CATALYST_RULES = {
 }
 
 RSS_FEEDS = {
-    "BSE Corporate Announcements": "https://beta.bseindia.com/rss-feed.html",
+    "Google News (Corporate Actions & Filings)": "https://news.google.com/rss/search?q=NSE+BSE+corporate+announcements+OR+results+OR+order+win+OR+FDA+OR+merger&hl=en-IN&gl=IN&ceid=IN:en",
     "Economic Times Markets": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "Moneycontrol News": "https://www.moneycontrol.com/rss/MCtopnews.xml"
+    "Moneycontrol News": "https://www.moneycontrol.com/rss/MCtopnews.xml",
+    "Business Standard Markets": "https://www.business-standard.com/rss/markets-106.rss"
 }
+
+FINBERT_SENTIMENT_LEXICON = {
+    "zero observations": 2.5, "eir clearance": 2.8, "rating upgraded": 2.2,
+    "pledge revoked": 2.4, "debt free": 2.6, "order win": 2.0, "all-time high profit": 2.5,
+    "revenue surge": 2.0, "margin expansion": 2.0, "value unlocking": 2.3,
+    "expansion": 1.2, "growth": 1.0, "dividend": 1.0, "buyback": 1.3, "joint venture": 1.4,
+    "qip": 1.3, "capacity addition": 1.2, "commissioned": 1.1, "positive outlook": 1.4,
+    "margin contraction": -1.5, "guidance cut": -1.8, "delay": -1.2, "pledged": -1.4,
+    "rating downgraded": -2.0, "loss": -1.3, "slump": -1.5,
+    "form 483": -2.2, "warning letter": -2.8, "import alert": -3.0, "oai": -2.5,
+    "show cause notice": -2.4, "fraud": -3.0, "search and seizure": -2.8, "auditor resignation": -2.9
+}
+
+def compute_finbert_sentiment(text: str) -> dict:
+    t_lower = text.lower()
+    score = 0.0
+    matched_clues = []
+    for phrase, weight in FINBERT_SENTIMENT_LEXICON.items():
+        if phrase in t_lower:
+            score += weight
+            matched_clues.append(f"{phrase} ({weight:+.1f})")
+    normalized_polarity = max(-1.0, min(1.0, score / 3.0)) if score != 0 else 0.0
+    label = "BULLISH" if normalized_polarity > 0.20 else ("BEARISH" if normalized_polarity < -0.20 else "NEUTRAL")
+    return {"polarity": round(normalized_polarity, 2), "label": label, "clues": matched_clues[:3]}
 
 def clean_html_text(raw_text):
     if not raw_text:
@@ -258,10 +303,14 @@ def fetch_corporate_catalysts(active_universe):
 
                 matched = [sym for sym in known_syms if re.search(rf"\b{sym}\b", full_text, re.IGNORECASE)]
 
+                sentiment_data = compute_finbert_sentiment(full_text)
                 item = {
                     "source": source_name, "title": title, "summary": summary,
                     "link": entry.get("link", "#"), "published": entry.get("published", str(datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"))),
-                    "catalyst": detected_catalyst, "impact": impact, "p1w": p1, "p2w": p2, "group": grp, "matched": matched
+                    "catalyst": detected_catalyst, "impact": impact, "p1w": p1, "p2w": p2, "group": grp, "matched": matched,
+                    "finbert_polarity": sentiment_data["polarity"],
+                    "finbert_label": sentiment_data["label"],
+                    "finbert_clues": sentiment_data["clues"]
                 }
                 news_items.append(item)
                 for sym in matched:
