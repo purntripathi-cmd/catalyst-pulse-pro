@@ -269,16 +269,27 @@ else:
     print("No changes required.")
 
 # =====================================================================
-# 3. Daily Dual-Logic Bear-Market Evaluation & Findings Persistence
+# 3. Daily Dual-Logic Bear-Market Evaluation & Automated 3 PM Trade Execution
 # =====================================================================
 try:
     import json
-    print("Executing Daily Dual-Logic Bear-Market evaluation (Headless EOD Cadence)...")
+    import subprocess
+    print("Executing Daily Dual-Logic Bear-Market evaluation (Headless 3:00 PM Cadence)...")
     from dual_logic_engine import DualLogicBacktestEngine
-    from dual_logic_ui import compute_live_deep_value_candidates
+    from dual_logic_ui import compute_live_deep_value_candidates, auto_execute_3pm_dual_logic_trades
 
     engine = DualLogicBacktestEngine.load_or_initialize()
-    candidates_df = compute_live_deep_value_candidates()
+    candidates_df = compute_live_deep_value_candidates(base_budget=50000.0)
+
+    # Automatically execute 3:00 PM paper trades for any new qualified stocks, ignoring duplicates
+    print("Executing automated 3:00 PM Dual-Logic paper trade allocation (₹50K budget, ignoring duplicates)...")
+    auto_trade_res = auto_execute_3pm_dual_logic_trades(
+        candidates_df=candidates_df,
+        current_user="GitHub_Actions_3PM_Daemon",
+        base_budget=50000.0,
+        force_run=True
+    )
+    print(f"3:00 PM Auto-Trade Result: {auto_trade_res.get('message')}")
 
     if not candidates_df.empty:
         findings_path = os.path.join("data", "dual_logic_findings.json")
@@ -294,14 +305,22 @@ try:
 
         now_ist_str = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
         existing_findings["last_updated_ist"] = now_ist_str
-        existing_findings["cadence"] = "Daily EOD Scheduled (Runs Mon-Fri via GitHub Actions even when app is closed)"
+        existing_findings["cadence"] = "Daily 3:00 PM Scheduled (Runs Mon-Fri via GitHub Actions even when app is closed)"
         existing_findings["top_candidates_count"] = len(candidates_df)
         existing_findings["high_conviction_count"] = int(candidates_df["Action_Signal"].str.contains("HIGH-CONVICTION").sum())
         existing_findings["top_candidates"] = candidates_df.head(10).to_dict(orient="records")
+        existing_findings["auto_3pm_last_run"] = auto_trade_res
 
         with open(findings_path, "w", encoding="utf-8") as f:
             json.dump(existing_findings, f, indent=2)
         print(f"Successfully refreshed daily Dual-Logic findings at {now_ist_str}.")
+
+        # Stage data files for git commit
+        try:
+            subprocess.run(["git", "add", "data/paper_trades.csv", "data/auto_3pm_trade_log.json", "data/dual_logic_findings.json"], check=False)
+        except Exception:
+            pass
 except Exception as ex_dl:
     print(f"Dual-Logic daily evaluation notice: {ex_dl}")
+
 

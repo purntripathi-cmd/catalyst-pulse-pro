@@ -1,0 +1,25 @@
+{
+  "last_run_date": "2026-10-01",
+  "last_run_timestamp": "2026-10-01 15:44:04 IST",
+  "trigger": "Manual_Force_Run",
+  "executed_count": 0,
+  "skipped_duplicate_count": 15,
+  "executed_tickers": [],
+  "skipped_tickers": [
+    "GOLDBEES",
+    "CONCOR",
+    "SIEMENS",
+    "COALINDIA",
+    "ABB",
+    "ITC",
+    "HINDUNILVR",
+    "SUNPHARMA",
+    "ULTRACEMCO",
+    "ONGC",
+    "CPSEETF",
+    "RELIANCE",
+    "TCS",
+    "BHEL",
+    "HCLTECH"
+  ]
+}
