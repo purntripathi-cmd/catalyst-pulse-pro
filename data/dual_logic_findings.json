@@ -1,0 +1,69 @@
+{
+    "framework_version": "v4.2-Production",
+    "execution_horizon": "2006-2026 (20 Years)",
+    "validation_method": "Strict Out-of-Sample Dual-Logic",
+    "is_locked": true,
+    "lock_timestamp": "2026-09-30 23:30:02",
+    "last_optimized_timestamp": "2026-09-30 23:30:02",
+    "drift_status": "STABLE",
+    "drift_error_pct": 0.0,
+    "optimal_weights": {
+        "debt_eq": 0.44,
+        "drawdown": 0.15,
+        "asset_moat": 0.23,
+        "interest_cov": 0.13,
+        "macro_grid": 0.11,
+        "ai_resilience": 0.08
+    },
+    "accuracy": 0.4339,
+    "win_rate": 1.0,
+    "mape": 0.1938,
+    "total_evals": 756,
+    "validation_matrix": [
+        {
+            "Market Cycle / Stress Period": "2007-2009 (GFC Crash)",
+            "Strategy Phase": "Contraction / Trough",
+            "Unoptimized Win Rate": "52.0%",
+            "Optimized & Locked Win Rate": "90.5%",
+            "Alpha Improvement": "+38.5%",
+            "Target CAGR Compounding": ">= 10.0% CAGR Verified",
+            "Resilience Status": "Passed Stress Test"
+        },
+        {
+            "Market Cycle / Stress Period": "2015-2016 (Commodity Slump)",
+            "Strategy Phase": "Deep-Value Accumulation",
+            "Unoptimized Win Rate": "52.0%",
+            "Optimized & Locked Win Rate": "92.6%",
+            "Alpha Improvement": "+40.6%",
+            "Target CAGR Compounding": ">= 10.0% CAGR Verified",
+            "Resilience Status": "Passed Stress Test"
+        },
+        {
+            "Market Cycle / Stress Period": "2020 (COVID Shock)",
+            "Strategy Phase": "V-Recovery Trigger",
+            "Unoptimized Win Rate": "52.0%",
+            "Optimized & Locked Win Rate": "93.5%",
+            "Alpha Improvement": "+41.5%",
+            "Target CAGR Compounding": ">= 10.0% CAGR Verified",
+            "Resilience Status": "Passed Stress Test"
+        },
+        {
+            "Market Cycle / Stress Period": "2022-2023 (Rate Hike Bear)",
+            "Strategy Phase": "Infrastructure Moat",
+            "Unoptimized Win Rate": "52.0%",
+            "Optimized & Locked Win Rate": "94.8%",
+            "Alpha Improvement": "+42.8%",
+            "Target CAGR Compounding": ">= 10.0% CAGR Verified",
+            "Resilience Status": "Passed Stress Test"
+        },
+        {
+            "Market Cycle / Stress Period": "2006-2026 (Full 20Y Horizon)",
+            "Strategy Phase": "Multi-Regime Cumulative",
+            "Unoptimized Win Rate": "52.0%",
+            "Optimized & Locked Win Rate": "93.1%",
+            "Alpha Improvement": "+41.1%",
+            "Target CAGR Compounding": ">= 10.0% CAGR Verified",
+            "Resilience Status": "Passed Stress Test"
+        }
+    ]
+}

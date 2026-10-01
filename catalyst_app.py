@@ -741,6 +741,7 @@ NAV_TABS = [
     "🔬 Single-Stock Deep Dive",
     "📰 Exchange Disclosures & Media Feed",
     "📊 Paper Prediction Audit & Win Rate",
+    "⚡ Dual-Logic Bear-Market Engine (v4.2)",
     "📖 Quantitative Strategy Handbook"
 ]
 
@@ -914,6 +915,16 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             }),
             use_container_width=True, height=420
         )
+
+        # Level 4: Bear-Market Resilience & Physical Moat Overlay
+        st.markdown("<hr style='margin-top: 0.8rem; margin-bottom: 0.8rem;' />", unsafe_allow_html=True)
+        with st.expander("🛡️ Level 4: AI-Powered Deep-Value & Contrarian Bear-Market Overlay (Dual-Logic v4.2)", expanded=False):
+            from dual_logic_ui import render_tab1_section6_bear_market_recommendations
+            render_tab1_section6_bear_market_recommendations(
+                stocks_market_df=display_all if "display_all" in locals() else catalyst_df,
+                base_budget=15000.0,
+                current_user="PulsePro_Trader"
+            )
 
 # VIEW 2: Stock Deep Dive with Vector RAG Insights & Filing Index Section
 elif nav_choice == "🔬 Single-Stock Deep Dive":
@@ -1466,3 +1477,26 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             st.info("No open positions currently active in the execution journal.")
     else:
         st.info("No predictions recorded yet.")
+
+# VIEW 6: AI-Powered Deep-Value & Contrarian Dual-Logic Bear-Market Engine (v4.2-Production)
+elif nav_choice == "⚡ Dual-Logic Bear-Market Engine (v4.2)":
+    from dual_logic_ui import render_tab1_section6_bear_market_recommendations, render_dual_logic_studio
+
+    st.markdown("### ⚡ AI-Powered Deep-Value & Contrarian Investment Architecture")
+    st.caption("Dual-Logic Out-of-Sample Engine (v4.2-Production) • 2006–2026 Stress Horizon • Bear-Market Resilience (>= 10% CAGR) • Energy Grids & Physical Moats")
+
+    dl_tab1, dl_tab2 = st.tabs([
+        "🎯 Live Deep-Value & Contrarian Recommendations",
+        "🔬 Autonomous Backtest Studio & Parameter Inspector"
+    ])
+
+    with dl_tab1:
+        render_tab1_section6_bear_market_recommendations(
+            stocks_market_df=catalyst_df if "catalyst_df" in locals() else None,
+            base_budget=15000.0,
+            current_user="PulsePro_Trader"
+        )
+
+    with dl_tab2:
+        render_dual_logic_studio()
+
