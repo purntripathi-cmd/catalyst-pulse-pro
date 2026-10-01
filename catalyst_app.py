@@ -609,6 +609,27 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         day_range = float(h.iloc[-1] - l.iloc[-1])
         close_pos_pct = round(((cmp - float(l.iloc[-1])) / day_range) * 100.0, 1) if day_range > 0 else 50.0
 
+        # Day low, weekly low (5D), 52-week low & high, RSI
+        day_low = float(l.iloc[-1])
+        dist_day_low = round(((cmp - day_low) / max(0.01, day_low)) * 100.0, 2)
+
+        weekly_low = float(l.iloc[-5:].min()) if len(l) >= 5 else day_low
+        dist_weekly_low = round(((cmp - weekly_low) / max(0.01, weekly_low)) * 100.0, 2)
+
+        low_52w = float(l.min())
+        dist_52w_low = round(((cmp - low_52w) / max(0.01, low_52w)) * 100.0, 2)
+
+        high_52w = float(h.max())
+        dist_52w_high = round(((cmp - high_52w) / max(0.01, high_52w)) * 100.0, 2)
+
+        # 14-period RSI
+        delta = c.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi_series = 100.0 - (100.0 / (1.0 + rs))
+        rsi_val = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
+
         cat_info = news_map.get(clean_sym, None)
         if cat_info:
             cat_name = cat_info["catalyst"]
@@ -679,6 +700,15 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
             "Vol Surge Ratio": vol_surge_ratio,
             "Close in Range %": close_pos_pct,
             "Dist 200DMA %": round(dist_200, 2),
+            "RSI (14D)": round(rsi_val, 1),
+            "Today Low (₹)": round(day_low, 2),
+            "Dist Today Low %": dist_day_low,
+            "Weekly Low (₹)": round(weekly_low, 2),
+            "Dist Weekly Low %": dist_weekly_low,
+            "52W Low (₹)": round(low_52w, 2),
+            "Dist 52W Low %": dist_52w_low,
+            "52W High (₹)": round(high_52w, 2),
+            "Dist 52W High %": dist_52w_high,
             "Active Catalyst": cat_name,
             "Catalyst Group": cat_group,
             "1-2W Outlook": outlook,
@@ -928,7 +958,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
             from dual_logic_ui import render_tab1_section6_bear_market_recommendations
             render_tab1_section6_bear_market_recommendations(
                 stocks_market_df=display_all if "display_all" in locals() else catalyst_df,
-                base_budget=15000.0,
+                base_budget=50000.0,
                 current_user="PulsePro_Trader"
             )
 
@@ -1499,7 +1529,7 @@ elif nav_choice == "⚡ Dual-Logic Bear-Market Engine (v4.2)":
     with dl_tab1:
         render_tab1_section6_bear_market_recommendations(
             stocks_market_df=catalyst_df if "catalyst_df" in locals() else None,
-            base_budget=15000.0,
+            base_budget=50000.0,
             current_user="PulsePro_Trader"
         )
 
