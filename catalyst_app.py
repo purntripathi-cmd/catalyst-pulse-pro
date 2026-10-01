@@ -733,8 +733,14 @@ regime_tag_full = f"{nifty_regime} (VIX: {curr_vix:.1f})"
 
 st.sidebar.markdown("---")
 st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
-st.sidebar.caption(f"Market Regime: {nifty_regime}")
 st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
+
+# Cloud Resource Monitor Widget (CPU / RAM)
+try:
+    from resource_monitor import render_resource_monitor_sidebar
+    render_resource_monitor_sidebar(key_suffix="pulse_sidebar")
+except Exception:
+    pass
 
 NAV_TABS = [
     "🎯 Dynamic 1-2 Week Screener",

@@ -10,3 +10,4 @@ xgboost>=2.0.0
 lightgbm>=4.0.0
 optuna>=3.5.0
 streamlit-autorefresh>=1.0.1
+psutil>=5.9.0

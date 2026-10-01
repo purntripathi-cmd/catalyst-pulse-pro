@@ -267,3 +267,41 @@ if changed:
     print("CSV updated and saved successfully.")
 else:
     print("No changes required.")
+
+# =====================================================================
+# 3. Daily Dual-Logic Bear-Market Evaluation & Findings Persistence
+# =====================================================================
+try:
+    import json
+    print("Executing Daily Dual-Logic Bear-Market evaluation (Headless EOD Cadence)...")
+    from dual_logic_engine import DualLogicBacktestEngine
+    from dual_logic_ui import compute_live_deep_value_candidates
+
+    engine = DualLogicBacktestEngine.load_or_initialize()
+    candidates_df = compute_live_deep_value_candidates()
+
+    if not candidates_df.empty:
+        findings_path = os.path.join("data", "dual_logic_findings.json")
+        os.makedirs("data", exist_ok=True)
+
+        existing_findings = {}
+        if os.path.exists(findings_path):
+            try:
+                with open(findings_path, "r", encoding="utf-8") as f:
+                    existing_findings = json.load(f)
+            except Exception:
+                pass
+
+        now_ist_str = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+        existing_findings["last_updated_ist"] = now_ist_str
+        existing_findings["cadence"] = "Daily EOD Scheduled (Runs Mon-Fri via GitHub Actions even when app is closed)"
+        existing_findings["top_candidates_count"] = len(candidates_df)
+        existing_findings["high_conviction_count"] = int(candidates_df["Action_Signal"].str.contains("HIGH-CONVICTION").sum())
+        existing_findings["top_candidates"] = candidates_df.head(10).to_dict(orient="records")
+
+        with open(findings_path, "w", encoding="utf-8") as f:
+            json.dump(existing_findings, f, indent=2)
+        print(f"Successfully refreshed daily Dual-Logic findings at {now_ist_str}.")
+except Exception as ex_dl:
+    print(f"Dual-Logic daily evaluation notice: {ex_dl}")
+
