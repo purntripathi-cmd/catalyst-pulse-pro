@@ -315,6 +315,335 @@ def square_off_long_term_paper_trade(trade_id, exit_cmp=None, exit_reason="Manua
     except Exception:
         pass
 
+COMPANY_NAME_LOOKUP = {
+    "GOLDBEES": "Nippon India ETF Gold BeES",
+    "CPSEETF": "CPSE ETF (PSU Giants)",
+    "CONCOR": "Container Corp of India",
+    "SIEMENS": "Siemens India Ltd",
+    "COALINDIA": "Coal India Limited",
+    "ABB": "ABB India Limited",
+    "ITC": "ITC Limited",
+    "HINDUNILVR": "Hindustan Unilever Ltd",
+    "SUNPHARMA": "Sun Pharma Industries",
+    "ULTRACEMCO": "UltraTech Cement Ltd",
+    "ONGC": "Oil & Natural Gas Corp",
+    "RELIANCE": "Reliance Industries Ltd",
+    "TCS": "Tata Consultancy Services",
+    "BHEL": "Bharat Heavy Electricals",
+    "HCLTECH": "HCL Technologies Ltd",
+    "POWERGRID": "Power Grid Corporation",
+    "NTPC": "NTPC Limited",
+    "LT": "Larsen & Toubro Ltd",
+    "TATASTEEL": "Tata Steel Limited",
+    "SBIN": "State Bank of India",
+    "HDFCBANK": "HDFC Bank Limited",
+    "ICICIBANK": "ICICI Bank Limited",
+    "AXISBANK": "Axis Bank Limited",
+    "BAJFINANCE": "Bajaj Finance Limited",
+    "INFY": "Infosys Limited",
+    "WIPRO": "Wipro Limited",
+    "HINDALCO": "Hindalco Industries",
+    "JSWSTEEL": "JSW Steel Limited",
+    "GRASIM": "Grasim Industries",
+    "BHARTIARTL": "Bharti Airtel Limited",
+    "TATAPOWER": "Tata Power Company",
+    "IOC": "Indian Oil Corporation",
+    "BPCL": "Bharat Petroleum Corp",
+    "MARUTI": "Maruti Suzuki India",
+    "TITAN": "Titan Company Limited"
+}
+
+
+def compute_long_term_portfolio_xirr(trades_df, as_of_date=None):
+    """
+    Computes exact XIRR (Extended Internal Rate of Return), holding durations, 
+    and comprehensive performance metrics for the active long-term portfolio.
+    
+    Formula:
+      Sum( C_i / (1 + r)^((d_i - d_0) / 365) ) = 0
+      where outflows C_i < 0 at investment dates, and terminal value > 0 at current date.
+    """
+    if trades_df is None or trades_df.empty:
+        return {
+            "total_invested": 0.0,
+            "total_current": 0.0,
+            "net_pnl_rs": 0.0,
+            "net_pnl_pct": 0.0,
+            "xirr_pct": 0.0,
+            "xirr_display": "+0.00%",
+            "target_xirr_pct": 32.76,
+            "target_xirr_display": "+32.8% p.a.",
+            "weighted_days": 0.0,
+            "is_day_zero": True,
+            "holdings_count": 0
+        }
+
+    total_invested = float(trades_df["Invested_Value"].sum())
+    total_current = float(trades_df["Current_Value"].sum())
+    net_pnl_rs = total_current - total_invested
+    net_pnl_pct = (net_pnl_rs / total_invested * 100.0) if total_invested > 0 else 0.0
+
+    if as_of_date is None:
+        now_date = datetime.datetime.now().date()
+    elif isinstance(as_of_date, str):
+        now_date = pd.to_datetime(as_of_date).date()
+    else:
+        now_date = as_of_date
+
+    dates = []
+    cash_flows = []
+    days_held_list = []
+    inv_weights = []
+
+    for _, row in trades_df.iterrows():
+        ts_str = str(row.get("Execution_Timestamp", "")).replace(" IST", "").strip()
+        try:
+            d = datetime.datetime.strptime(ts_str.split()[0], "%Y-%m-%d").date()
+        except Exception:
+            d = now_date
+        dates.append(d)
+        inv = float(row.get("Invested_Value", 0.0))
+        cash_flows.append(-inv)
+        age = max(0, (now_date - d).days)
+        days_held_list.append(age)
+        inv_weights.append(inv)
+
+    weighted_days = (sum(a * w for a, w in zip(days_held_list, inv_weights)) / total_invested) if total_invested > 0 else 0.0
+
+    # Append terminal portfolio value
+    dates.append(now_date)
+    cash_flows.append(total_current)
+
+    min_date = min(dates)
+    day_diffs = [(d - min_date).days for d in dates]
+    max_days = max(day_diffs)
+
+    target_annualized_xirr = ((1.0 + 0.15) ** (365.0 / 180.0) - 1.0) * 100.0
+
+    if max_days < 1:
+        xirr_pct = net_pnl_pct
+        xirr_display = f"{net_pnl_pct:+.2f}% (Day 1 / Inception)"
+        is_day_zero = True
+    else:
+        def npv(r):
+            return sum(cf / ((1.0 + r) ** (day / 365.0)) for cf, day in zip(cash_flows, day_diffs))
+        try:
+            from scipy.optimize import brentq
+            r = brentq(npv, -0.999, 10.0)
+            xirr_pct = float(r * 100.0)
+            xirr_display = f"{xirr_pct:+.2f}% p.a."
+        except Exception:
+            cagr = ((total_current / total_invested) ** (365.0 / max(1, max_days)) - 1.0) * 100.0
+            xirr_pct = float(cagr)
+            xirr_display = f"{xirr_pct:+.2f}% p.a. (CAGR)"
+        is_day_zero = False
+
+    return {
+        "total_invested": total_invested,
+        "total_current": total_current,
+        "net_pnl_rs": net_pnl_rs,
+        "net_pnl_pct": net_pnl_pct,
+        "xirr_pct": xirr_pct,
+        "xirr_display": xirr_display,
+        "target_xirr_pct": target_annualized_xirr,
+        "target_xirr_display": f"+{target_annualized_xirr:.1f}% p.a.",
+        "weighted_days": weighted_days,
+        "is_day_zero": is_day_zero,
+        "holdings_count": len(trades_df)
+    }
+
+
+def render_active_long_term_portfolio_snapshot_section(
+    active_portfolio_df=None,
+    live_market_lookup=None,
+    key_prefix="lt_port",
+    title="Active Long-Term Portfolio Snapshot (₹50,000 Sizing per Asset)",
+    as_expander=False
+):
+    """
+    Renders the dedicated Active Long-Term Portfolio Snapshot table, complete with:
+    - 5 Key KPI Metric cards (Deployed Capital, Valuation, Unrealized P&L, XIRR Return, Moat Win Rate)
+    - Full breakdown table with ₹50K sizing, entry prices, live CMPs, P&L, Target XIRR, and holding ages
+    - 1-Click Square-Off / Exit mechanism
+    - Export to CSV
+    - Explanatory notes on XIRR and zero-duplicate guard
+    """
+    if active_portfolio_df is None or active_portfolio_df.empty:
+        _, active_portfolio_df = get_active_long_term_trades(live_market_lookup)
+
+    perf = compute_long_term_portfolio_xirr(active_portfolio_df)
+
+    def _render_content():
+        if active_portfolio_df.empty:
+            st.info("💡 **No Active Long-Term Positions Yet.** Review Category 6 recommendations in the Dual-Logic tab to deploy initial ₹50,000 tranches or wait for the 3:00 PM automated execution.")
+            return
+
+        # 1. Header and 5-Metric KPI Cards Bar
+        st.markdown(
+            f"""
+            <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); border-radius: 10px; padding: 14px 18px; margin-bottom: 14px; border: 1px solid #334155; color: white;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <div>
+                        <span style="font-weight: 800; font-size: 1.05rem; color: #f8fafc;">🏛️ {title}</span>
+                        <div style="font-size: 0.78rem; color: #94a3b8; margin-top: 2px;">
+                            Dual-Logic v4.2 Institutional Bear Resilience • Fixed ₹50,000 Tranches • Zero-Duplicate Guard • Real-Time XIRR Return Engine
+                        </div>
+                    </div>
+                    <span style="background-color: #0284c7; color: white; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">
+                        {perf['holdings_count']} Active Holdings
+                    </span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Capital Deployed", f"₹{perf['total_invested']:,.2f}", f"{perf['holdings_count']} Assets @ ₹50K")
+        k2.metric("Current Valuation", f"₹{perf['total_current']:,.2f}", "Live CMP Valuation")
+        k3.metric("Net Unrealized P&L", f"₹{perf['net_pnl_rs']:+,.2f}", f"{perf['net_pnl_pct']:+.2f}% MTM")
+        k4.metric("Portfolio XIRR Return", perf['xirr_display'], f"🎯 Target: {perf['target_xirr_display']}")
+        k5.metric("Moat Win Rate", "93.1% (20Y)", "Stop -8% | Tgt +15%")
+
+        st.markdown("<div style='margin-top: 0.6rem;'></div>", unsafe_allow_html=True)
+
+        # 2. Enrich and Format Table
+        disp_df = active_portfolio_df.copy()
+        
+        now_date = datetime.datetime.now().date()
+        days_held_col = []
+        name_col = []
+        target_xirr_col = []
+
+        for _, r in disp_df.iterrows():
+            sym = str(r["Ticker"]).replace(".NS", "").strip().upper()
+            c_name = COMPANY_NAME_LOOKUP.get(sym, sym)
+            name_col.append(c_name)
+
+            ts_str = str(r.get("Execution_Timestamp", "")).replace(" IST", "").strip()
+            try:
+                d = datetime.datetime.strptime(ts_str.split()[0], "%Y-%m-%d").date()
+                diff = max(0, (now_date - d).days)
+                days_held_col.append(f"{diff} Days (Day 1)" if diff == 0 else f"{diff} Days")
+            except Exception:
+                days_held_col.append("0 Days")
+
+            target_xirr_col.append("+32.8% p.a.")
+
+        disp_df["Asset Name"] = name_col
+        disp_df["Holding Age"] = days_held_col
+        disp_df["Target XIRR"] = target_xirr_col
+        disp_df["Duplicate Guard"] = "🔒 Active (No Re-buy)"
+
+        rename_cols = {
+            "Ticker": "Symbol",
+            "Asset Name": "Asset / Company",
+            "Category": "Strategy / Physical Moat",
+            "Execution_Timestamp": "Entry Timestamp (IST)",
+            "Holding Age": "Days Held",
+            "Entry_Price": "Entry Price (₹)",
+            "Live_CMP": "Live CMP (₹)",
+            "Executed_Qty": "Qty",
+            "Invested_Value": "Invested Capital (₹)",
+            "Current_Value": "Current Value (₹)",
+            "PnL_Rs": "Unrealized P&L (₹)",
+            "PnL_Pct": "Return %",
+            "Stop_Loss": "Stop-Loss (₹)",
+            "Target": "Target (₹)",
+            "Target XIRR": "Target XIRR (180D)",
+            "Duplicate Guard": "Duplicate Guard"
+        }
+
+        cols_order = [
+            "Symbol", "Asset / Company", "Strategy / Physical Moat", "Entry Timestamp (IST)", 
+            "Days Held", "Entry Price (₹)", "Live CMP (₹)", "Qty", "Invested Capital (₹)", 
+            "Current Value (₹)", "Unrealized P&L (₹)", "Return %", "Stop-Loss (₹)", 
+            "Target (₹)", "Target XIRR (180D)", "Duplicate Guard"
+        ]
+
+        table_df = disp_df.rename(columns=rename_cols)
+        final_cols = [c for c in cols_order if c in table_df.columns]
+        styled_df = table_df[final_cols]
+
+        def style_pnl(df):
+            styles = pd.DataFrame("", index=df.index, columns=df.columns)
+            if "Unrealized P&L (₹)" in df.columns:
+                styles["Unrealized P&L (₹)"] = df["Unrealized P&L (₹)"].apply(
+                    lambda v: "color: #155724; font-weight: bold; background-color: #d4edda;" if v > 0
+                    else ("color: #721c24; font-weight: bold; background-color: #f8d7da;" if v < 0 else "")
+                )
+            if "Return %" in df.columns:
+                styles["Return %"] = df["Return %"].apply(
+                    lambda v: "color: #155724; font-weight: bold; background-color: #d4edda;" if v > 0
+                    else ("color: #721c24; font-weight: bold; background-color: #f8d7da;" if v < 0 else "")
+                )
+            return styles
+
+        st.dataframe(
+            styled_df.style.apply(style_pnl, axis=None).format({
+                "Entry Price (₹)": "₹{:.2f}",
+                "Live CMP (₹)": "₹{:.2f}",
+                "Invested Capital (₹)": "₹{:,.2f}",
+                "Current Value (₹)": "₹{:,.2f}",
+                "Unrealized P&L (₹)": "₹{:,.2f}",
+                "Return %": "{:+.2f}%",
+                "Stop-Loss (₹)": "₹{:.2f}",
+                "Target (₹)": "₹{:.2f}"
+            }, na_rep="-"),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # 3. Actions & Controls Bar
+        col_act1, col_act2, col_act3 = st.columns([2, 1.5, 1.5])
+        with col_act1:
+            sq_sym = st.selectbox(
+                "Select Position to Square Off / Exit:", 
+                options=list(active_portfolio_df["Ticker"].unique()), 
+                key=f"{key_prefix}_sq_select"
+            )
+        with col_act2:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if st.button(f"🛑 Square Off {sq_sym}", key=f"{key_prefix}_sq_btn_{sq_sym}", use_container_width=True):
+                matched = active_portfolio_df[active_portfolio_df["Ticker"] == sq_sym]
+                if not matched.empty:
+                    t_id = matched.iloc[0]["Trade_ID"]
+                    exit_p = matched.iloc[0]["Live_CMP"]
+                    square_off_long_term_paper_trade(t_id, exit_cmp=exit_p, exit_reason="Manual Paper Trade Exit")
+                    st.success(f"Successfully squared off {sq_sym} at ₹{exit_p:.2f}!")
+                    st.rerun()
+        with col_act3:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            csv_data = styled_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Export Snapshot CSV",
+                data=csv_data,
+                file_name=f"active_long_term_portfolio_{datetime.date.today()}.csv",
+                mime="text/csv",
+                key=f"{key_prefix}_csv_download",
+                use_container_width=True
+            )
+
+        # 4. Explainer Collapsible
+        with st.expander("ℹ️ Understanding Portfolio Sizing, Zero-Duplicate Guard & XIRR Methodology", expanded=False):
+            st.markdown(
+                """
+                - **Fixed Budget Allocation**: Each asset receives an exact ₹50,000 initial tranche (`base_budget = 50000.0`), computing whole unit quantities based on entry CMP.
+                - **Strict Zero-Duplicate Guard**: If a stock is already open in the active portfolio, the system strictly skips it. Only newly qualifying stocks trigger a ₹50,000 allocation.
+                - **XIRR (Extended Internal Rate of Return)**: Measures the annualized compound rate of return for irregular/non-periodic cash flows based on actual purchase dates ($d_i$) and terminal portfolio valuation:
+                  $$\\sum_{i=1}^{N} \\frac{C_i}{(1 + r)^{\\frac{d_i - d_0}{365}}} = 0$$
+                  *Note: For fresh positions on Day 1 (holding duration < 1 day), absolute MTM return is displayed as standard annualization formula is mathematically indeterminate on zero days.*
+                - **Target XIRR**: A +15.0% price target achieved across the 180-day holding horizon translates to **+32.8% Annualized XIRR**.
+                """
+            )
+
+    if as_expander:
+        with st.expander(f"💼 {title} ({len(active_portfolio_df)} Active Positions)", expanded=(len(active_portfolio_df) > 0)):
+            _render_content()
+    else:
+        st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
+        _render_content()
+        st.markdown("<hr style='margin-top: 1.0rem; margin-bottom: 1.0rem;' />", unsafe_allow_html=True)
 
 
 def auto_execute_3pm_dual_logic_trades(candidates_df=None, current_user="Auto_3PM_Daemon", base_budget=50000.0, force_run=False):
@@ -1543,70 +1872,13 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
     )
 
     # 3. Dedicated Active Long-Term Paper Portfolio & Performance Tracker
-    with st.expander(f"💼 Category 6 Active Long-Term Paper Portfolio & Performance Tracker ({len(active_portfolio_df)} Active Positions)", expanded=(len(active_portfolio_df) > 0)):
-        if not active_portfolio_df.empty:
-            total_invested = float(active_portfolio_df["Invested_Value"].sum())
-            total_current = float(active_portfolio_df["Current_Value"].sum())
-            total_pnl = total_current - total_invested
-            total_pnl_pct = (total_pnl / total_invested * 100.0) if total_invested > 0 else 0.0
-            pnl_color = "#16a34a" if total_pnl >= 0 else "#dc2626"
-
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric("Capital Deployed", f"₹{total_invested:,.2f}", help="Fixed ₹50,000 allocation per qualified long-term stock")
-            kpi2.metric("Current Portfolio Value", f"₹{total_current:,.2f}")
-            kpi3.metric("Net Unrealized P&L", f"₹{total_pnl:+,.2f}", f"{total_pnl_pct:+.2f}%")
-            kpi4.metric("Active Moat Positions", f"{len(active_portfolio_df)} Stocks", "Zero Duplicates")
-
-            # Table of Active Positions
-            disp_active = active_portfolio_df.copy()
-            rename_active = {
-                "Ticker": "Symbol",
-                "Category": "Strategy / Moat",
-                "Entry_Price": "Entry (₹)",
-                "Live_CMP": "CMP (₹)",
-                "Executed_Qty": "Qty",
-                "Invested_Value": "Invested (₹)",
-                "Current_Value": "Current Val (₹)",
-                "PnL_Rs": "P&L (₹)",
-                "PnL_Pct": "P&L (%)",
-                "Stop_Loss": "Stop Loss (₹)",
-                "Target": "Target (₹)",
-                "Execution_Timestamp": "Entry Timestamp"
-            }
-            show_cols = [c for c in rename_active.keys() if c in disp_active.columns]
-            styled_active = disp_active[show_cols].rename(columns=rename_active)
-
-            st.dataframe(
-                styled_active.style.format({
-                    "Entry (₹)": "₹{:.2f}",
-                    "CMP (₹)": "₹{:.2f}",
-                    "Invested (₹)": "₹{:,.2f}",
-                    "Current Val (₹)": "₹{:,.2f}",
-                    "P&L (₹)": "₹{:,.2f}",
-                    "P&L (%)": "{:+.2f}%",
-                    "Stop Loss (₹)": "₹{:.2f}",
-                    "Target (₹)": "₹{:.2f}"
-                }, na_rep="-"),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # 1-Click Square-Off Control
-            c_sq1, c_sq2 = st.columns([2.5, 1.5])
-            with c_sq1:
-                sq_ticker = st.selectbox("Select Active Position to Exit / Square Off:", list(active_portfolio_df["Ticker"].unique()), key="sec6_sq_ticker")
-            with c_sq2:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                if st.button(f"🛑 Square Off {sq_ticker}", key=f"btn_sq_off_{sq_ticker}", use_container_width=True):
-                    matched_trade = active_portfolio_df[active_portfolio_df["Ticker"] == sq_ticker]
-                    if not matched_trade.empty:
-                        t_id = matched_trade.iloc[0]["Trade_ID"]
-                        live_exit_cmp = matched_trade.iloc[0]["Live_CMP"]
-                        square_off_long_term_paper_trade(t_id, exit_cmp=live_exit_cmp, exit_reason="Manual Long-Term Exit")
-                        st.success(f"Successfully squared off {sq_ticker} at ₹{live_exit_cmp:.2f}!")
-                        st.rerun()
-        else:
-            st.info("💡 **No Active Long-Term Positions Yet.** Review the high-conviction qualified candidates below and click **⚡ Invest ₹50,000 Paper Trade** to initiate a long-term position. The system will enforce ₹50,000 budget sizing and strictly block duplicate purchases.")
+    render_active_long_term_portfolio_snapshot_section(
+        active_portfolio_df=active_portfolio_df,
+        live_market_lookup=live_lookup,
+        key_prefix="sec6_port",
+        title="Category 6 Active Long-Term Paper Portfolio & Performance Tracker",
+        as_expander=True
+    )
 
     # 4. Parameter Directionality and Logic Guide Expander
     render_parameter_and_logic_guide()

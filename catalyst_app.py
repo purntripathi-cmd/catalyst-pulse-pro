@@ -1211,10 +1211,21 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             b4.metric("Benchmark Alpha (α)", f"{alpha_vs_nifty:+.2f}%", "Outperformance" if alpha_vs_nifty > 0 else "Underperformance")
 
         # =====================================================================
-        # TABLE 1: Active Portfolio Holdings & Holding Age Breakdown
+        # DEDICATED TABLE: Active Long-Term Portfolio Snapshot (₹50,000 Sizing per Asset)
+        # =====================================================================
+        from dual_logic_ui import render_active_long_term_portfolio_snapshot_section
+        render_active_long_term_portfolio_snapshot_section(
+            live_market_lookup=live_score_lookup,
+            key_prefix="tab4_lt_port",
+            title="Active Long-Term Portfolio Snapshot (₹50,000 Sizing per Asset)",
+            as_expander=False
+        )
+
+        # =====================================================================
+        # TABLE 1: Tactical Swing Portfolio Holdings (₹15,000 Tranche)
         # =====================================================================
         st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
-        st.markdown("##### 💼 Active Portfolio Holdings & Holding Age Breakdown")
+        st.markdown("##### 💼 Tactical Swing Portfolio Holdings (₹15,000 Sizing) & Holding Age Breakdown")
         
         active_holdings_df = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
         if not active_holdings_df.empty:
