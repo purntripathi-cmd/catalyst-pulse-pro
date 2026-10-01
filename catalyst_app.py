@@ -270,7 +270,9 @@ def clean_html_text(raw_text):
 # =====================================================================
 # Section 2: Data Ingestion & Technical Math
 # =====================================================================
-@st.cache_data(ttl=60)
+MARKET_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "market_cache.parquet")
+
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_corporate_catalysts(active_universe):
     news_items, matched_map, ticker_news_history = [], {}, {}
     known_syms = [x["ticker"].replace(".NS", "") for x in active_universe]
@@ -324,14 +326,28 @@ def fetch_corporate_catalysts(active_universe):
 
     return news_items, matched_map, ticker_news_history
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=900, show_spinner=False)
 def load_market_data(tickers):
     download_list = list(tickers) + ["^NSEI", "^INDIAVIX"]
     try:
-        return yf.download(download_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True, threads=True)
+        df = yf.download(download_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True, threads=True)
+        if df is not None and not df.empty and len(df) > 10:
+            try:
+                os.makedirs(os.path.dirname(MARKET_CACHE_FILE), exist_ok=True)
+                df.to_parquet(MARKET_CACHE_FILE)
+            except Exception:
+                pass
+            return df
     except Exception as e:
         logger.error(f"yfinance download failed: {e}")
-        return pd.DataFrame()
+
+    if os.path.exists(MARKET_CACHE_FILE):
+        try:
+            logger.info("Loaded market data from local snapshot cache.")
+            return pd.read_parquet(MARKET_CACHE_FILE)
+        except Exception as e:
+            logger.warning(f"Failed to read market snapshot cache: {e}")
+    return pd.DataFrame()
 
 # =====================================================================
 # Section 3: AI Vector RAG & Semantic Disclosure Engine
@@ -366,6 +382,7 @@ def get_rag_disclosure_insights(query_ticker, ticker_news_hist, stock_row):
 # =====================================================================
 LEDGER_FILENAME = "catalyst_prediction_ledger.csv"
 
+@st.cache_data(ttl=180, show_spinner=False)
 def get_github_ledger():
     token = st.secrets.get("GITHUB_PAT", os.environ.get("GITHUB_PAT", ""))
     repo = st.secrets.get("GITHUB_REPO", os.environ.get("GITHUB_REPO", ""))
@@ -404,6 +421,11 @@ def commit_github_ledger(updated_df, sha=None):
     csv_bytes = updated_df.to_csv(index=False).encode("utf-8")
     b64_content = base64.b64encode(csv_bytes).decode("utf-8")
     
+    try:
+        get_github_ledger.clear()
+    except Exception:
+        pass
+
     if not token or not repo:
         updated_df.to_csv(LEDGER_FILENAME, index=False)
         return True
@@ -579,6 +601,7 @@ def audit_and_update_outcomes(raw_data):
         commit_github_ledger(ledger, sha)
     return ledger
 
+@st.cache_data(ttl=900, show_spinner=False)
 def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
     if raw_data.empty:
         return pd.DataFrame()

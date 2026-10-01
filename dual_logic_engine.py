@@ -527,8 +527,16 @@ class DualLogicBacktestEngine:
 
         return findings
 
+    _engine_cache = None
+    _engine_mtime = None
+
     @classmethod
-    def load_or_initialize(cls) -> "DualLogicBacktestEngine":
+    def load_or_initialize(cls, force_reload: bool = False) -> "DualLogicBacktestEngine":
+        mtime = os.path.getmtime(FINDINGS_JSON_PATH) if os.path.exists(FINDINGS_JSON_PATH) else 0.0
+
+        if not force_reload and cls._engine_cache is not None and cls._engine_mtime == mtime:
+            return cls._engine_cache
+
         from data_pipeline_20y import generate_20y_ground_truth_dataset
         df = generate_20y_ground_truth_dataset()
         engine = cls(df)
@@ -553,6 +561,8 @@ class DualLogicBacktestEngine:
             engine.is_locked = True
             engine.save_findings()
 
+        cls._engine_cache = engine
+        cls._engine_mtime = mtime
         return engine
 
 

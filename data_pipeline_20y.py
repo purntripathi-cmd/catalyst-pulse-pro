@@ -102,6 +102,8 @@ MACRO_CALENDAR = {
     2026: {"regime": "Expansion", "regime_code": 0, "grid_load_idx": 0.98, "commodity_deficit": 0.88, "logistics_idx": 0.89, "stress_event": "Physical Moat Hegemony"}
 }
 
+_CACHED_20Y_DATASET = None
+
 def generate_20y_ground_truth_dataset(force_recreate: bool = False) -> pd.DataFrame:
     """
     Constructs the official 2006-2026 20-Year multi-source dataset across the 4 foundational dimensions.
@@ -112,12 +114,17 @@ def generate_20y_ground_truth_dataset(force_recreate: bool = False) -> pd.DataFr
     4. Macro & AI Disruption: Power_Grid_Load_Index, Commodity_Supply_Deficit, Logistics_Bottleneck, AI_Vulnerability_Score
     5. Decoupled Ground Truth: Actual_3Y_CAGR, Actual_Success (CAGR >= 10%), Actual_Max_DD
     """
+    global _CACHED_20Y_DATASET
+    if not force_recreate and _CACHED_20Y_DATASET is not None:
+        return _CACHED_20Y_DATASET.copy()
+
     if os.path.exists(DATASET_FILE) and not force_recreate:
         try:
             df = pd.read_csv(DATASET_FILE)
             if len(df) >= 500 and "Year" in df.columns:
                 logger.info(f"Loaded existing 20Y dataset from {DATASET_FILE} ({len(df)} records).")
-                return df
+                _CACHED_20Y_DATASET = df
+                return df.copy()
         except Exception as e:
             logger.warning(f"Failed to read existing dataset: {e}. Rebuilding...")
 
