@@ -193,17 +193,20 @@ def get_active_long_term_trades(live_market_lookup=None):
                     inv_val = float(row.get("Invested_Value", entry_p * qty))
                     live_cmp = entry_p
 
-                    if live_market_lookup and (t in live_market_lookup or f"{t}.NS" in live_market_lookup):
-                        matched_rec = live_market_lookup.get(t) or live_market_lookup.get(f"{t}.NS")
-                        try:
-                            if isinstance(matched_rec, (int, float)):
-                                live_cmp = float(matched_rec)
-                            elif isinstance(matched_rec, dict):
-                                live_cmp = float(matched_rec.get("CMP (₹)") or matched_rec.get("CMP") or matched_rec.get("Close") or entry_p)
-                            elif hasattr(matched_rec, "get"):
-                                live_cmp = float(matched_rec.get("CMP (₹)", entry_p))
-                        except Exception:
-                            pass
+                    if live_market_lookup:
+                        matched_rec = live_market_lookup.get(t)
+                        if matched_rec is None:
+                            matched_rec = live_market_lookup.get(f"{t}.NS")
+                        if matched_rec is not None:
+                            try:
+                                if isinstance(matched_rec, (int, float)):
+                                    live_cmp = float(matched_rec)
+                                elif isinstance(matched_rec, dict):
+                                    live_cmp = float(matched_rec.get("CMP (₹)") or matched_rec.get("CMP") or matched_rec.get("Close") or entry_p)
+                                elif hasattr(matched_rec, "get"):
+                                    live_cmp = float(matched_rec.get("CMP (₹)", entry_p))
+                            except Exception:
+                                pass
                     elif "Live_CMP" in row and not pd.isna(row["Live_CMP"]):
                         try:
                             c_cand = float(row["Live_CMP"])
@@ -246,17 +249,20 @@ def get_active_long_term_trades(live_market_lookup=None):
                     if t not in active_trades:
                         entry_p = float(row.get("CMP_At_Prediction", 0.0))
                         live_cmp = float(row.get("Current_CMP", entry_p))
-                        if live_market_lookup and (t in live_market_lookup or f"{t}.NS" in live_market_lookup):
-                            matched_rec = live_market_lookup.get(t) or live_market_lookup.get(f"{t}.NS")
-                            try:
-                                if isinstance(matched_rec, (int, float)):
-                                    live_cmp = float(matched_rec)
-                                elif isinstance(matched_rec, dict):
-                                    live_cmp = float(matched_rec.get("CMP (₹)") or matched_rec.get("CMP") or matched_rec.get("Close") or live_cmp)
-                                elif hasattr(matched_rec, "get"):
-                                    live_cmp = float(matched_rec.get("CMP (₹)", live_cmp))
-                            except Exception:
-                                pass
+                        if live_market_lookup:
+                            matched_rec = live_market_lookup.get(t)
+                            if matched_rec is None:
+                                matched_rec = live_market_lookup.get(f"{t}.NS")
+                            if matched_rec is not None:
+                                try:
+                                    if isinstance(matched_rec, (int, float)):
+                                        live_cmp = float(matched_rec)
+                                    elif isinstance(matched_rec, dict):
+                                        live_cmp = float(matched_rec.get("CMP (₹)") or matched_rec.get("CMP") or matched_rec.get("Close") or live_cmp)
+                                    elif hasattr(matched_rec, "get"):
+                                        live_cmp = float(matched_rec.get("CMP (₹)", live_cmp))
+                                except Exception:
+                                    pass
 
                         qty = max(1, int(50000.0 / entry_p)) if entry_p > 0 else 1
                         inv_val = round(qty * entry_p, 2)
@@ -1532,22 +1538,26 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         for _, row in stocks_df.iterrows():
             t = str(row.get("Ticker", "")).strip().upper()
             t_clean = t.replace(".NS", "")
-            live_market_lookup[t] = row
-            live_market_lookup[t_clean] = row
+            r_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            live_market_lookup[t] = r_dict
+            live_market_lookup[t_clean] = r_dict
 
     if etfs_df is not None and not etfs_df.empty:
         for _, row in etfs_df.iterrows():
             t = str(row.get("Ticker", "")).strip().upper()
             t_clean = t.replace(".NS", "")
-            live_market_lookup[t] = row
-            live_market_lookup[t_clean] = row
+            r_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+            live_market_lookup[t] = r_dict
+            live_market_lookup[t_clean] = r_dict
 
     # Ensure ALL 36 universe assets have live market quotes and technicals (fetches missing stocks & ETFs)
     missing_universe = []
     for p in UNIVERSE_PROFILES:
         t_clean = p["ticker"].replace(".NS", "").strip().upper()
         t_ns = f"{t_clean}.NS"
-        rec = live_market_lookup.get(t_clean) or live_market_lookup.get(t_ns)
+        rec = live_market_lookup.get(t_clean)
+        if rec is None:
+            rec = live_market_lookup.get(t_ns)
         if rec is None:
             missing_universe.append(t_ns)
         else:
@@ -1589,7 +1599,9 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         dii_12m_chg = float(p.get("dii_12m_chg", 1.8))
         inst_trend = p.get("inst_trend", f"🟢 Institutional Accumulation (FII {fii_12m_chg:+.1f}%, DII {dii_12m_chg:+.1f}%)")
 
-        matched = live_market_lookup.get(ticker) or live_market_lookup.get(ticker_clean)
+        matched = live_market_lookup.get(ticker)
+        if matched is None:
+            matched = live_market_lookup.get(ticker_clean)
         if matched is not None:
             try:
                 cmp_val = float(matched.get("CMP (₹)", 0.0))
@@ -2020,7 +2032,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
     )
 
     # Active Long-Term Portfolio Tracking & Duplicate Check
-    live_lookup = {r["Ticker"]: r for _, r in candidates_df.iterrows()}
+    live_lookup = {r["Ticker"]: r.to_dict() if hasattr(r, "to_dict") else dict(r) for _, r in candidates_df.iterrows()}
     active_trades_dict, active_portfolio_df = get_active_long_term_trades(live_lookup)
 
     # Top KPI Metrics & Breadth Pulse
