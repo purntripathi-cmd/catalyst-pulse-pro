@@ -45,6 +45,56 @@ from data_pipeline_20y import generate_20y_ground_truth_dataset, UNIVERSE_PROFIL
 
 PULSE_LEDGER_CSV = os.path.join(CURRENT_DIR, "catalyst_prediction_ledger.csv")
 
+# Calibrated 2026 market pricing for offline/weekend pricing across all 36 universe assets
+FALLBACK_UNIVERSE_CMP = {
+    "ABB.NS": 6900.00, "ADANIPORTS.NS": 1774.00, "AXISBANK.NS": 1222.20,
+    "BAJFINANCE.NS": 970.00, "BHARTIARTL.NS": 1779.90, "BHEL.NS": 429.00,
+    "BPCL.NS": 296.95, "COALINDIA.NS": 425.10, "CONCOR.NS": 442.00,
+    "CPSEETF.NS": 89.78, "GOLDBEES.NS": 121.43, "GRASIM.NS": 2962.00,
+    "HCLTECH.NS": 1201.90, "HDFCBANK.NS": 704.80, "HINDALCO.NS": 938.40,
+    "HINDUNILVR.NS": 1838.40, "ICICIBANK.NS": 1332.00, "INFY.NS": 1020.50,
+    "IOC.NS": 130.50, "ITC.NS": 268.90, "JSWSTEEL.NS": 1235.30,
+    "JUNIORBEES.NS": 747.52, "LT.NS": 3750.00, "NIFTYBEES.NS": 256.50,
+    "NTPC.NS": 315.10, "ONGC.NS": 224.90, "POWERGRID.NS": 257.00,
+    "RELIANCE.NS": 1186.40, "SBIN.NS": 958.00, "SIEMENS.NS": 3701.10,
+    "SUNPHARMA.NS": 1779.70, "TATAPOWER.NS": 351.50, "TATASTEEL.NS": 178.14,
+    "TCS.NS": 2114.40, "ULTRACEMCO.NS": 10710.00, "WIPRO.NS": 162.14
+}
+for _k in list(FALLBACK_UNIVERSE_CMP.keys()):
+    FALLBACK_UNIVERSE_CMP[_k.replace(".NS", "")] = FALLBACK_UNIVERSE_CMP[_k]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_live_market_quotes(tickers_tuple):
+    """
+    Fetches latest live quotes for a list of tickers via yfinance with 5-minute caching.
+    """
+    quotes = {}
+    if not tickers_tuple:
+        return quotes
+    try:
+        ns_tickers = [f"{t}.NS" if not t.endswith(".NS") else t for t in tickers_tuple]
+        data = yf.download(ns_tickers, period="5d", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
+        for t_orig in tickers_tuple:
+            clean = t_orig.replace(".NS", "").strip().upper()
+            ns = f"{clean}.NS"
+            hist = pd.Series(dtype=float)
+            if isinstance(data.columns, pd.MultiIndex):
+                for cand in [ns, clean]:
+                    if cand in data.columns.levels[0]:
+                        hist = data[cand]["Close"].dropna()
+                        break
+            else:
+                if "Close" in data.columns:
+                    hist = data["Close"].dropna()
+            if not hist.empty:
+                val = round(float(hist.iloc[-1]), 2)
+                quotes[clean] = val
+                quotes[ns] = val
+    except Exception:
+        pass
+    return quotes
+
 
 def get_active_long_term_trades(live_market_lookup=None):
     """
@@ -60,22 +110,34 @@ def get_active_long_term_trades(live_market_lookup=None):
         try:
             df_local = pd.read_csv(LOCAL_TRADES_CSV)
             if not df_local.empty and "Status" in df_local.columns and "Ticker" in df_local.columns:
-                active_local = df_local[df_local["Status"] == "ACTIVE"]
+                if "Category" in df_local.columns:
+                    active_local = df_local[(df_local["Status"] == "ACTIVE") & (df_local["Category"].astype(str).str.contains("Long Term|Physical Moat|Category 6|Dual-Logic", case=False, na=False))]
+                else:
+                    active_local = df_local[df_local["Status"] == "ACTIVE"]
+
                 for _, row in active_local.iterrows():
                     t = str(row["Ticker"]).replace(".NS", "").strip().upper()
                     entry_p = float(row.get("Entry_Price", 0.0))
                     qty = int(row.get("Executed_Qty", 1))
                     inv_val = float(row.get("Invested_Value", entry_p * qty))
                     live_cmp = entry_p
+
                     if live_market_lookup and (t in live_market_lookup or f"{t}.NS" in live_market_lookup):
                         matched_rec = live_market_lookup.get(t) or live_market_lookup.get(f"{t}.NS")
                         try:
-                            live_cmp = float(matched_rec.get("CMP (₹)", entry_p))
+                            if isinstance(matched_rec, (int, float)):
+                                live_cmp = float(matched_rec)
+                            elif isinstance(matched_rec, dict):
+                                live_cmp = float(matched_rec.get("CMP (₹)") or matched_rec.get("CMP") or matched_rec.get("Close") or entry_p)
+                            elif hasattr(matched_rec, "get"):
+                                live_cmp = float(matched_rec.get("CMP (₹)", entry_p))
                         except Exception:
                             pass
                     elif "Live_CMP" in row and not pd.isna(row["Live_CMP"]):
                         try:
-                            live_cmp = float(row["Live_CMP"])
+                            c_cand = float(row["Live_CMP"])
+                            if c_cand > 0:
+                                live_cmp = c_cand
                         except Exception:
                             pass
 
@@ -116,7 +178,12 @@ def get_active_long_term_trades(live_market_lookup=None):
                         if live_market_lookup and (t in live_market_lookup or f"{t}.NS" in live_market_lookup):
                             matched_rec = live_market_lookup.get(t) or live_market_lookup.get(f"{t}.NS")
                             try:
-                                live_cmp = float(matched_rec.get("CMP (₹)", live_cmp))
+                                if isinstance(matched_rec, (int, float)):
+                                    live_cmp = float(matched_rec)
+                                elif isinstance(matched_rec, dict):
+                                    live_cmp = float(matched_rec.get("CMP (₹)") or matched_rec.get("CMP") or matched_rec.get("Close") or live_cmp)
+                                elif hasattr(matched_rec, "get"):
+                                    live_cmp = float(matched_rec.get("CMP (₹)", live_cmp))
                             except Exception:
                                 pass
 
@@ -145,6 +212,28 @@ def get_active_long_term_trades(live_market_lookup=None):
         except Exception:
             pass
 
+    # 3. Dynamic Quote Verification Fallback for Missing Tickers (e.g. ETFs or un-cached stocks)
+    if active_trades:
+        missing_live = [
+            t for t, tr in active_trades.items() 
+            if not live_market_lookup or (t not in live_market_lookup and f"{t}.NS" not in live_market_lookup)
+        ]
+        if missing_live:
+            try:
+                live_fetched = fetch_live_market_quotes(tuple(sorted(missing_live)))
+                for t in missing_live:
+                    if t in live_fetched and t in active_trades:
+                        c_val = live_fetched[t]
+                        if c_val > 0:
+                            e_p = active_trades[t]["Entry_Price"]
+                            q = active_trades[t]["Executed_Qty"]
+                            active_trades[t]["Live_CMP"] = c_val
+                            active_trades[t]["Current_Value"] = round(q * c_val, 2)
+                            active_trades[t]["PnL_Rs"] = round((c_val - e_p) * q, 2)
+                            active_trades[t]["PnL_Pct"] = round(((c_val - e_p) / e_p) * 100.0, 2) if e_p > 0 else 0.0
+            except Exception:
+                pass
+
     if active_trades:
         active_df = pd.DataFrame(list(active_trades.values()))
     else:
@@ -164,9 +253,9 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
     """
     sym = candidate["Ticker"]
     full_sym = candidate.get("Full_Ticker", f"{sym}.NS")
-    cmp_val = float(candidate["CMP (₹)"])
+    cmp_val = float(candidate.get("CMP (₹)", 0.0))
     if cmp_val <= 0:
-        cmp_val = 500.0
+        cmp_val = float(FALLBACK_UNIVERSE_CMP.get(full_sym, FALLBACK_UNIVERSE_CMP.get(sym, 1000.0)))
 
     # Guard against duplicates
     active_trades, _ = get_active_long_term_trades()
@@ -1382,20 +1471,45 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             live_market_lookup[t] = row
             live_market_lookup[t_clean] = row
 
+    # Dynamic quote fetch fallback if run headless without pre-populated DataFrames
+    if not live_market_lookup:
+        try:
+            profile_tickers = [p["ticker"] for p in UNIVERSE_PROFILES]
+            raw_dl = yf.download(profile_tickers, period="5d", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
+            if not raw_dl.empty:
+                for p in UNIVERSE_PROFILES:
+                    t_ns = p["ticker"]
+                    t_cl = t_ns.replace(".NS", "")
+                    h_series = pd.Series(dtype=float)
+                    if isinstance(raw_dl.columns, pd.MultiIndex):
+                        for c in [t_ns, t_cl]:
+                            if c in raw_dl.columns.levels[0]:
+                                h_series = raw_dl[c]["Close"].dropna()
+                                break
+                    else:
+                        if "Close" in raw_dl.columns:
+                            h_series = raw_dl["Close"].dropna()
+                    if not h_series.empty:
+                        last_c = round(float(h_series.iloc[-1]), 2)
+                        l52 = round(float(h_series.min()), 2)
+                        h52 = round(float(h_series.max()), 2)
+                        rec = {
+                            "Ticker": t_ns,
+                            "CMP (₹)": last_c,
+                            "52W Low (₹)": l52,
+                            "52W High (₹)": h52,
+                            "Dist 52W High %": round(((last_c - h52) / max(1.0, h52)) * 100.0, 1),
+                            "Dist 52W Low %": round(((last_c - l52) / max(1.0, l52)) * 100.0, 1)
+                        }
+                        live_market_lookup[t_ns] = rec
+                        live_market_lookup[t_cl] = rec
+        except Exception:
+            pass
+
     # Fetch active portfolio positions for duplicate check
     active_trades, _ = get_active_long_term_trades(live_market_lookup)
 
-    # Calibrated fallback pricing for offline/weekend pricing
-    fallback_cmp = {
-        "POWERGRID.NS": 318.50, "NTPC.NS": 395.20, "ONGC.NS": 286.40,
-        "COALINDIA.NS": 482.10, "RELIANCE.NS": 2980.00, "LT.NS": 3650.00,
-        "ADANIPORTS.NS": 1420.00, "TATASTEEL.NS": 158.50, "ULTRACEMCO.NS": 11400.00,
-        "CONCOR.NS": 890.00, "SIEMENS.NS": 7250.00, "ABB.NS": 8100.00,
-        "CPSEETF.NS": 98.40, "GOLDBEES.NS": 68.20, "SETFNIF50.NS": 272.50,
-        "NIFTYBEES.NS": 285.50, "SBIN.NS": 788.00, "HDFCBANK.NS": 1650.00,
-        "HINDALCO.NS": 655.00, "JSWSTEEL.NS": 945.00, "GRASIM.NS": 2520.00,
-        "TATAPOWER.NS": 445.00, "IOC.NS": 175.00, "BPCL.NS": 348.00, "BHEL.NS": 285.00
-    }
+    fallback_cmp = FALLBACK_UNIVERSE_CMP
 
     records = []
     for p in UNIVERSE_PROFILES:
@@ -1469,7 +1583,7 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
 
             drawdown = abs(dist_52w_high) / 100.0
             if cmp_val <= 0:
-                cmp_val = fallback_cmp.get(ticker, 500.0)
+                cmp_val = float(fallback_cmp.get(ticker) or fallback_cmp.get(ticker_clean, 1000.0))
                 low_52w = round(cmp_val * 0.88, 2)
                 dist_52w_low = round(((cmp_val - low_52w) / low_52w) * 100.0, 1)
                 weekly_low = round(cmp_val * 0.98, 2)
@@ -1477,7 +1591,7 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
                 day_low = round(cmp_val * 0.992, 2)
                 dist_day_low = round(((cmp_val - day_low) / day_low) * 100.0, 1)
         else:
-            cmp_val = fallback_cmp.get(ticker, 500.0)
+            cmp_val = float(fallback_cmp.get(ticker) or fallback_cmp.get(ticker_clean, 1000.0))
             rsi_val = 44.5
             dist_200 = -1.8
             low_52w = round(cmp_val * 0.875, 2)

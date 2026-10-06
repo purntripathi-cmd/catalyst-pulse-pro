@@ -1172,6 +1172,14 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             display_ledger["Catalyst_Score"] = 0.0
 
         live_score_lookup = dict(zip(catalyst_df["Ticker"], catalyst_df["Catalyst Score"])) if not catalyst_df.empty else {}
+        live_price_lookup = {}
+        if not catalyst_df.empty and "Ticker" in catalyst_df.columns:
+            for _, c_row in catalyst_df.iterrows():
+                t_clean = str(c_row["Ticker"]).replace(".NS", "").strip().upper()
+                c_val = float(c_row.get("CMP (₹)", 0.0))
+                if c_val > 0:
+                    live_price_lookup[t_clean] = {"CMP (₹)": c_val, "Catalyst Score": c_row.get("Catalyst Score", 0.0)}
+                    live_price_lookup[f"{t_clean}.NS"] = {"CMP (₹)": c_val, "Catalyst Score": c_row.get("Catalyst Score", 0.0)}
         def resolve_cat_score(row_val, ticker_sym):
             f_val = float(row_val) if pd.notna(row_val) else 0.0
             if f_val == 0.0:
@@ -1238,7 +1246,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         # =====================================================================
         from dual_logic_ui import render_active_long_term_portfolio_snapshot_section
         render_active_long_term_portfolio_snapshot_section(
-            live_market_lookup=live_score_lookup,
+            live_market_lookup=live_price_lookup,
             key_prefix="tab4_lt_port",
             title="Active Long-Term Portfolio Snapshot (₹50,000 Sizing per Asset)",
             as_expander=False

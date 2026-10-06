@@ -315,12 +315,58 @@ try:
             json.dump(existing_findings, f, indent=2)
         print(f"Successfully refreshed daily Dual-Logic findings at {now_ist_str}.")
 
+        # Refresh Live_CMP and mark-to-market values for active positions in data/paper_trades.csv
+        trades_path = os.path.join("data", "paper_trades.csv")
+        if os.path.exists(trades_path):
+            try:
+                pt_df = pd.read_csv(trades_path)
+                if not pt_df.empty and "Status" in pt_df.columns:
+                    active_mask = pt_df["Status"] == "ACTIVE"
+                    cand_map = dict(zip(candidates_df["Ticker"], candidates_df["CMP (₹)"])) if "CMP (₹)" in candidates_df.columns else {}
+                    for p_idx, p_row in pt_df[active_mask].iterrows():
+                        sym_clean = str(p_row["Ticker"]).replace(".NS", "").strip().upper()
+                        if sym_clean in cand_map and float(cand_map[sym_clean]) > 0:
+                            c_cmp = float(cand_map[sym_clean])
+                        else:
+                            c_cmp = float(p_row.get("Live_CMP", p_row.get("Entry_Price", 0.0)))
+                        
+                        e_p = float(p_row.get("Entry_Price", 0.0))
+                        qty = int(p_row.get("Executed_Qty", 1))
+                        pt_df.at[p_idx, "Live_CMP"] = c_cmp
+                        pt_df.at[p_idx, "Current_Value"] = round(qty * c_cmp, 2)
+                        pt_df.at[p_idx, "PnL_Rs"] = round((c_cmp - e_p) * qty, 2)
+                        pt_df.at[p_idx, "PnL_Pct"] = round(((c_cmp - e_p) / e_p) * 100.0, 2) if e_p > 0 else 0.0
+                    pt_df.to_csv(trades_path, index=False)
+                    print("Successfully refreshed mark-to-market values in data/paper_trades.csv.")
+            except Exception as e_pt:
+                print(f"Paper trades MTM update notice: {e_pt}")
+
         # Stage data files for git commit
         try:
-            subprocess.run(["git", "add", "data/paper_trades.csv", "data/auto_3pm_trade_log.json", "data/dual_logic_findings.json"], check=False)
+            subprocess.run(["git", "add", "catalyst_prediction_ledger.csv", "data/paper_trades.csv", "data/auto_3pm_trade_log.json", "data/dual_logic_findings.json"], check=False)
         except Exception:
             pass
 except Exception as ex_dl:
     print(f"Dual-Logic daily evaluation notice: {ex_dl}")
+
+# =====================================================================
+# 5. Refresh Dividend Screener Cache (Autonomous Fleet Sync)
+# =====================================================================
+try:
+    import sys
+    div_screener_daemon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "div_screener", "screener_daemon.py")
+    if os.path.exists(div_screener_daemon):
+        print("Running Dividend Screener autonomous cache refresh...")
+        subprocess.run(
+            [sys.executable, div_screener_daemon, "--once"], 
+            cwd=os.path.dirname(div_screener_daemon), 
+            capture_output=True, 
+            text=True, 
+            timeout=30
+        )
+        print("Dividend screener sync completed.")
+except Exception as ex_div:
+    print(f"Dividend screener sync notice: {ex_div}")
+
 
 
