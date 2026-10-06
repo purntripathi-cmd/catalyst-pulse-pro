@@ -9,6 +9,10 @@ import datetime
 import pandas as pd
 import numpy as np
 import streamlit as st
+import logging
+import yfinance as yf
+
+logger = logging.getLogger("DualLogicUI")
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
@@ -94,6 +98,73 @@ def fetch_live_market_quotes(tickers_tuple):
     except Exception:
         pass
     return quotes
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_complete_universe_technicals(tickers_tuple):
+    """
+    Fetches 1-year historical daily bars for universe tickers and computes:
+    CMP, 52W High, 52W Low, Dist 52W High %, Dist 52W Low %, Weekly Low, Dist Weekly Low %,
+    Today Low, Dist Today Low %, 14D RSI, and Dist 200DMA %. Caches for 5 minutes.
+    """
+    results = {}
+    if not tickers_tuple:
+        return results
+    ns_tickers = [f"{t}.NS" if not t.endswith(".NS") else t for t in tickers_tuple]
+    try:
+        raw_dl = yf.download(ns_tickers, period="1y", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
+        for t in tickers_tuple:
+            clean = t.replace(".NS", "").strip().upper()
+            ns = f"{clean}.NS"
+            sub = pd.DataFrame()
+            if isinstance(raw_dl.columns, pd.MultiIndex):
+                for cand in [ns, clean]:
+                    if cand in raw_dl.columns.levels[0]:
+                        sub = raw_dl[cand].dropna()
+                        break
+            else:
+                if "Close" in raw_dl.columns:
+                    sub = raw_dl.dropna()
+
+            if not sub.empty and len(sub) >= 5:
+                c, h, l = sub["Close"], sub["High"], sub["Low"]
+                cmp_val = round(float(c.iloc[-1]), 2)
+                l52 = round(float(l.min()), 2)
+                h52 = round(float(h.max()), 2)
+                w_low = round(float(l.iloc[-5:].min()), 2)
+                d_low = round(float(l.iloc[-1]), 2)
+
+                delta = c.diff()
+                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                rs = gain / loss.replace(0, np.nan)
+                rsi_series = 100.0 - (100.0 / (1.0 + rs))
+                rsi_val = round(float(rsi_series.iloc[-1]), 1) if len(c) >= 15 else 48.0
+                if np.isnan(rsi_val):
+                    rsi_val = 48.0
+
+                d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                dist_200 = round(((cmp_val - d200) / max(0.01, d200)) * 100.0, 2)
+
+                rec = {
+                    "Ticker": clean,
+                    "CMP (₹)": cmp_val,
+                    "52W Low (₹)": l52,
+                    "52W High (₹)": h52,
+                    "Dist 52W High %": round(((cmp_val - h52) / max(1.0, h52)) * 100.0, 2),
+                    "Dist 52W Low %": round(((cmp_val - l52) / max(1.0, l52)) * 100.0, 2),
+                    "Weekly Low (₹)": w_low,
+                    "Dist Weekly Low %": round(((cmp_val - w_low) / max(1.0, w_low)) * 100.0, 2),
+                    "Today Low (₹)": d_low,
+                    "Dist Today Low %": round(((cmp_val - d_low) / max(1.0, d_low)) * 100.0, 2),
+                    "RSI (14D)": rsi_val,
+                    "Dist 200DMA %": dist_200
+                }
+                results[clean] = rec
+                results[ns] = rec
+    except Exception as e:
+        logger.warning(f"Error in fetch_complete_universe_technicals: {e}")
+    return results
 
 
 def get_active_long_term_trades(live_market_lookup=None):
@@ -1471,40 +1542,26 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             live_market_lookup[t] = row
             live_market_lookup[t_clean] = row
 
-    # Dynamic quote fetch fallback if run headless without pre-populated DataFrames
-    if not live_market_lookup:
-        try:
-            profile_tickers = [p["ticker"] for p in UNIVERSE_PROFILES]
-            raw_dl = yf.download(profile_tickers, period="5d", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
-            if not raw_dl.empty:
-                for p in UNIVERSE_PROFILES:
-                    t_ns = p["ticker"]
-                    t_cl = t_ns.replace(".NS", "")
-                    h_series = pd.Series(dtype=float)
-                    if isinstance(raw_dl.columns, pd.MultiIndex):
-                        for c in [t_ns, t_cl]:
-                            if c in raw_dl.columns.levels[0]:
-                                h_series = raw_dl[c]["Close"].dropna()
-                                break
-                    else:
-                        if "Close" in raw_dl.columns:
-                            h_series = raw_dl["Close"].dropna()
-                    if not h_series.empty:
-                        last_c = round(float(h_series.iloc[-1]), 2)
-                        l52 = round(float(h_series.min()), 2)
-                        h52 = round(float(h_series.max()), 2)
-                        rec = {
-                            "Ticker": t_ns,
-                            "CMP (₹)": last_c,
-                            "52W Low (₹)": l52,
-                            "52W High (₹)": h52,
-                            "Dist 52W High %": round(((last_c - h52) / max(1.0, h52)) * 100.0, 1),
-                            "Dist 52W Low %": round(((last_c - l52) / max(1.0, l52)) * 100.0, 1)
-                        }
-                        live_market_lookup[t_ns] = rec
-                        live_market_lookup[t_cl] = rec
-        except Exception:
-            pass
+    # Ensure ALL 36 universe assets have live market quotes and technicals (fetches missing stocks & ETFs)
+    missing_universe = []
+    for p in UNIVERSE_PROFILES:
+        t_clean = p["ticker"].replace(".NS", "").strip().upper()
+        t_ns = f"{t_clean}.NS"
+        rec = live_market_lookup.get(t_clean) or live_market_lookup.get(t_ns)
+        if rec is None:
+            missing_universe.append(t_ns)
+        else:
+            try:
+                c_val = float(rec.get("CMP (₹)", 0.0) if hasattr(rec, "get") else getattr(rec, "CMP (₹)", 0.0))
+                if c_val <= 0:
+                    missing_universe.append(t_ns)
+            except Exception:
+                missing_universe.append(t_ns)
+
+    if missing_universe:
+        fetched_universe_tech = fetch_complete_universe_technicals(tuple(sorted(set(missing_universe))))
+        for k, v in fetched_universe_tech.items():
+            live_market_lookup[k] = v
 
     # Fetch active portfolio positions for duplicate check
     active_trades, _ = get_active_long_term_trades(live_market_lookup)
@@ -1975,11 +2032,25 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
     buy_pct = (len(buy_picks) / tot_c) * 100
     watch_pct = (len(watch_picks) / tot_c) * 100
 
+    # Dynamic 20Y Out-of-Sample Win Rate from locked engine findings
+    win_rate_20y_str = "93.1%"
+    if os.path.exists(FINDINGS_JSON_PATH):
+        try:
+            with open(FINDINGS_JSON_PATH, "r", encoding="utf-8") as f:
+                f_data = json.load(f)
+                vm = f_data.get("validation_matrix", [])
+                for row in vm:
+                    if "Full 20Y" in row.get("Market Cycle / Stress Period", ""):
+                        win_rate_20y_str = row.get("Optimized & Locked Win Rate", "93.1%")
+                        break
+        except Exception:
+            pass
+
     st.markdown(
         f"""
         <div style="background: #f1f5f9; padding: 8px 14px; border-radius: 6px; font-size: 0.82rem; color: #1e293b; margin: 8px 0 10px 0; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid #059669;">
             <span><b>Category 6 Moat Breadth Pulse:</b> 🟢 High-Conviction Buys: <b>{len(buy_picks)} ({buy_pct:.0f}%)</b> | 🟡 Watchlist Dips: <b>{len(watch_picks)} ({watch_pct:.0f}%)</b> | ⚪ Capital Preservation: <b>{len(neutral_picks)}</b></span>
-            <span>🔒 Engine: <b>Locked Production (v4.2)</b> | 20Y Out-of-Sample Win Rate: <b>93.1%</b> | Target: <b>&ge; 10% CAGR</b></span>
+            <span>🔒 Engine: <b>Locked Production (v4.2)</b> | 20Y Out-of-Sample Win Rate: <b>{win_rate_20y_str}</b> | Target: <b>&ge; 10% CAGR</b></span>
         </div>
         """,
         unsafe_allow_html=True
@@ -2174,6 +2245,16 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             """
         )
         engine = DualLogicBacktestEngine.load_or_initialize()
+
+        c_rm1, c_rm2 = st.columns([1.8, 3.2])
+        with c_rm1:
+            if st.button("🔄 Rerun 20Y Analytics Pipeline", key="btn_rerun_20y_analytics", use_container_width=True, help="Reruns the full 20-year (2006–2026) multi-regime backtest across 756 stress points and updates the validation matrix."):
+                with st.spinner("Rerunning 20-Year Historical Analytics & Stress-Cycle Evaluations..."):
+                    engine.generate_validation_matrix()
+                    st.cache_data.clear()
+                    st.success("✅ 20-Year Historical Analytics successfully verified and updated!")
+                    st.rerun()
+
         matrix_df = engine.generate_validation_matrix()
         st.dataframe(
             matrix_df,
