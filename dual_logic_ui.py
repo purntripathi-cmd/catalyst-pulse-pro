@@ -358,7 +358,7 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
         "Category": "Long Term (Physical Moat)",
         "Asset_Class": "ETF" if "ETF" in sym or "BEES" in sym else "Equity",
         "Trigger_Type": "Dual-Logic v4.2 Bear Resilience",
-        "Trigger_Indicator": f"Composite {score:.2f} | Tech {tech_score:.1f} | Fund {fund_score:.1f} | Moat {moat_score:.2f}",
+        "Trigger_Indicator": f"Composite {score*100:.1f}% | Tech {tech_score:.1f}% | Fund {fund_score:.1f}% | Moat {moat_score:.2f}",
         "Strategy_Preset": "Deep-Value & Contrarian Bear Resilience",
         "Status": "ACTIVE",
         "Entry_Price": cmp_val,
@@ -1026,11 +1026,11 @@ def render_spotlight_pick_card(r, idx, active_trades_dict, current_user, save_tr
             st.markdown("###### 📊 Multi-Factor Quantitative Scores Trio:")
             sc_m1, sc_m2, sc_m3 = st.columns(3)
             with sc_m1:
-                st.metric("Composite 🟢 HTB", f"{score:.3f}", f"{int(score*100)}% Conviction")
+                st.metric("Composite 🟢 HTB", f"{score*100:.1f}%", f"{int(score*100)}% Conviction")
             with sc_m2:
-                st.metric("Technical 🟢 HTB", f"{tech_score:.1f}", "/ 100 Pts")
+                st.metric("Technical 🟢 HTB", f"{tech_score:.1f}%", "/ 100 Pts")
             with sc_m3:
-                st.metric("Fundamental 🟢 HTB", f"{fund_score:.1f}", "/ 100 Pts")
+                st.metric("Fundamental 🟢 HTB", f"{fund_score:.1f}%", "/ 100 Pts")
 
             st.markdown(
                 f"""
@@ -1181,9 +1181,9 @@ def render_side_by_side_pick_card(r, idx, active_trades_dict, current_user, save
             f"""
             <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 6px 8px; font-size: 0.75rem; margin-bottom: 6px;">
                 <div style="display: flex; justify-content: space-between;">
-                    <span>Composite: <b style="color: #047857;">{score:.3f}</b></span>
-                    <span>Tech: <b style="color: #2563eb;">{tech_score:.0f}</b></span>
-                    <span>Fund: <b style="color: #7c3aed;">{fund_score:.0f}</b></span>
+                    <span>Composite: <b style="color: #047857;">{score*100:.1f}%</b></span>
+                    <span>Tech: <b style="color: #2563eb;">{tech_score:.0f}%</b></span>
+                    <span>Fund: <b style="color: #7c3aed;">{fund_score:.0f}%</b></span>
                 </div>
             </div>
             """,
@@ -1886,9 +1886,9 @@ def render_parameter_and_logic_guide():
                     "Parameter": "Dual-Logic Score (Composite)",
                     "Directionality": "🟢 Higher the Better (HTB)",
                     "Production Weight": "100% Final Score",
-                    "Passing Benchmark": ">= 0.75 (High Conviction)",
-                    "Meaning & Why It Matters": "Multi-factor weighted conviction score tested across 2006–2026. >= 0.75: High-Conviction Buy (Tranche allocated); 0.65 - 0.74: Watchlist Accumulate; < 0.65: Neutral.",
-                    "Mathematical Logic": "Closed-loop optimized weighted sum calibrated against 20Y out-of-sample data"
+                    "Passing Benchmark": ">= 75.0% (High Conviction)",
+                    "Meaning & Why It Matters": "Multi-factor weighted conviction score tested across 2006–2026. >= 75.0%: High-Conviction Buy (Tranche allocated); 65.0% - 74.9%: Watchlist Accumulate; < 65.0%: Neutral.",
+                    "Mathematical Logic": "Closed-loop optimized weighted sum calibrated against 20Y out-of-sample data (normalized 0%–100%)"
                 },
                 {
                     "Parameter": "RSI (14-Day)",
@@ -2211,9 +2211,9 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
         st.dataframe(
             disp_df.style.format({
                 "CMP (₹)": "₹{:.2f}",
-                "Composite Score 🟢 HTB": "{:.3f}",
-                "Tech Score 🟢 HTB": "{:.1f}",
-                "Fund Score 🟢 HTB": "{:.1f}",
+                "Composite Score 🟢 HTB": "{:.1%}",
+                "Tech Score 🟢 HTB": "{:.1f}%",
+                "Fund Score 🟢 HTB": "{:.1f}%",
                 "RSI (14D) 🎯 SSR": "{:.1f}",
                 "52W Low (₹)": "₹{:.2f}",
                 "Dist 52W Low %": "+{:.1f}%",
