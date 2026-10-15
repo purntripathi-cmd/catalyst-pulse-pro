@@ -197,6 +197,7 @@ class DualLogicBacktestEngine:
         self.cached_matrix = None
         self.drift_status = "STABLE"
         self.drift_error_pct = 0.0
+        self.findings = {}
 
     # -----------------------------------------------------------------
     # LOGIC A: BLIND PREDICTIVE ENGINE (Point-in-Time Prediction)
@@ -522,6 +523,7 @@ class DualLogicBacktestEngine:
         else:
             runs_df.to_csv(RUNS_CSV_PATH, index=False)
 
+        self.findings = findings
         return findings
 
     _engine_cache = None
@@ -542,6 +544,7 @@ class DualLogicBacktestEngine:
             try:
                 with open(FINDINGS_JSON_PATH, "r") as f:
                     data = json.load(f)
+                    engine.findings = data
                     engine.weights = data.get("optimal_weights", DEFAULT_OPTIMIZED_WEIGHTS)
                     engine.is_locked = data.get("is_locked", True)
                     engine.lock_timestamp = data.get("lock_timestamp", "2026-09-30 22:00:00")
