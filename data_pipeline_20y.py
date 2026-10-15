@@ -6,6 +6,7 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import yfinance as yf
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -14,6 +15,7 @@ logger = logging.getLogger("DataPipeline20Y")
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DATASET_FILE = os.path.join(DATA_DIR, "dual_logic_20y_dataset.csv")
+HISTORICAL_BARS_CACHE = os.path.join(DATA_DIR, "historical_20y_bars.parquet")
 
 # Sector taxonomy & physical moat / AI disruption profiling
 UNIVERSE_PROFILES = [
@@ -104,15 +106,42 @@ MACRO_CALENDAR = {
 
 _CACHED_20Y_DATASET = None
 
+def fetch_or_load_historical_bars(force_download: bool = False) -> pd.DataFrame:
+    """
+    Retrieves daily adjusted OHLCV bars for the universe + benchmarks from 2002 to 2026.
+    Caches to parquet to accelerate subsequent runs and prevent API rate limiting.
+    """
+    if not force_download and os.path.exists(HISTORICAL_BARS_CACHE):
+        try:
+            logger.info(f"Loading cached historical bars from {HISTORICAL_BARS_CACHE}...")
+            raw_data = pd.read_parquet(HISTORICAL_BARS_CACHE)
+            if not raw_data.empty:
+                return raw_data
+        except Exception as e:
+            logger.warning(f"Error reading parquet cache: {e}. Downloading fresh bars...")
+
+    tickers = [p["ticker"] for p in UNIVERSE_PROFILES]
+    all_tickers = sorted(list(set(tickers + ["^BSESN", "^NSEI"])))
+    logger.info(f"Downloading historical bars for {len(all_tickers)} assets via yfinance (2002-2026)...")
+    raw_data = yf.download(all_tickers, start="2002-01-01", end="2026-10-15", group_by="ticker", auto_adjust=True, progress=False)
+    
+    try:
+        raw_data.to_parquet(HISTORICAL_BARS_CACHE)
+        logger.info(f"Saved historical bars cache to {HISTORICAL_BARS_CACHE}.")
+    except Exception as e:
+        logger.warning(f"Could not save parquet cache: {e}")
+        
+    return raw_data
+
 def generate_20y_ground_truth_dataset(force_recreate: bool = False) -> pd.DataFrame:
     """
-    Constructs the official 2006-2026 20-Year multi-source dataset across the 4 foundational dimensions.
+    Constructs the official 2006-2026 20-Year empirical ground truth dataset across the 4 foundational dimensions.
     Features:
-    1. Price & Momentum: Drawdown_3Y, Drawdown_Velocity, MA_Cross_Spread, Dist_200DMA
-    2. Balance Sheet: Debt_Equity (<1.5), Interest_Coverage (>3.0), OCF_Consistency, CapEx_Intensity
+    1. Price & Momentum: Drawdown_3Y, Drawdown_Velocity, MA_Cross_Spread, Dist_200DMA (calculated from actual historical prices)
+    2. Balance Sheet: Debt_Equity, Interest_Coverage, OCF_Consistency, CapEx_Intensity (fundamental taxonomy with regime impact)
     3. Physical Moat: Infrastructure_Moat, Replacement_Cost_Barrier, Regulatory_Protection, Asset_Moat_Score
     4. Macro & AI Disruption: Power_Grid_Load_Index, Commodity_Supply_Deficit, Logistics_Bottleneck, AI_Vulnerability_Score
-    5. Decoupled Ground Truth: Actual_3Y_CAGR, Actual_Success (CAGR >= 10%), Actual_Max_DD
+    5. Empirical Ground Truth: Actual_3Y_CAGR, Actual_Success (CAGR >= 10%), Actual_Max_DD (derived from actual forward price paths)
     """
     global _CACHED_20Y_DATASET
     if not force_recreate and _CACHED_20Y_DATASET is not None:
@@ -128,113 +157,162 @@ def generate_20y_ground_truth_dataset(force_recreate: bool = False) -> pd.DataFr
         except Exception as e:
             logger.warning(f"Failed to read existing dataset: {e}. Rebuilding...")
 
-    logger.info("Generating high-fidelity 2006-2026 20-Year multi-asset ground truth dataset...")
+    logger.info("Constructing genuine 2006-2026 20-Year empirical ground truth dataset from real historical price bars...")
+    raw_data = fetch_or_load_historical_bars()
+
+    # Benchmark series for macro regime calculation
+    if "^BSESN" in raw_data.columns.levels[0]:
+        bench_series = raw_data["^BSESN"]["Close"].dropna()
+    elif "^NSEI" in raw_data.columns.levels[0]:
+        bench_series = raw_data["^NSEI"]["Close"].dropna()
+    else:
+        raise ValueError("No benchmark data (^BSESN or ^NSEI) available in historical data.")
+
     records = []
-    np.random.seed(42)  # Deterministic empirical fidelity
+    years = list(range(2006, 2027))
 
-    for yr in range(2006, 2027):
-        macro = MACRO_CALENDAR.get(yr, {
-            "regime": "Expansion", "regime_code": 0, "grid_load_idx": 0.70,
-            "commodity_deficit": 0.60, "logistics_idx": 0.60, "stress_event": "Standard Regime"
-        })
-        is_stress_yr = macro["regime"] in ["Contraction", "Trough"]
-        
-        for profile in UNIVERSE_PROFILES:
-            ticker = profile["ticker"]
-            name = profile["name"]
-            sector = profile["sector"]
-            capex_scale = profile["capex_scale"]
-            ai_vuln = profile["ai_vulnerability"]
-            base_de = profile["base_de"]
-            base_ic = profile["base_ic"]
+    for yr in years:
+        target_dt = pd.Timestamp(f"{yr}-03-25", tz=bench_series.index.tz)
 
-            # Balance sheet simulation with cyclical variation
-            de_shock = 0.25 * (1.0 if is_stress_yr else -0.1) * np.random.uniform(0.8, 1.2)
-            debt_eq = max(0.01, round(base_de + de_shock, 3))
-            
-            ic_shock = 0.3 * (0.6 if is_stress_yr else 1.2) * np.random.uniform(0.85, 1.15)
-            int_cov = max(1.1, round(base_ic * ic_shock, 2))
-            
-            ocf_consistency = round(np.clip(1.0 - (debt_eq / 4.0) + (capex_scale * 0.25) + np.random.uniform(-0.08, 0.08), 0.25, 0.98), 3)
-            capex_intensity = round(np.clip(capex_scale + np.random.uniform(-0.06, 0.06), 0.10, 0.95), 3)
+        # Benchmark regime at target_dt
+        b_idx = bench_series.index.searchsorted(target_dt)
+        if b_idx >= len(bench_series):
+            b_idx = len(bench_series) - 1
 
-            # Physical Moat & Asset Scarcity Scoring (0.0 to 1.0)
-            infra_moat = round(np.clip(capex_scale * 1.05 + np.random.uniform(-0.05, 0.05), 0.15, 0.98), 3)
-            repl_cost = round(np.clip(capex_scale * 1.1 + np.random.uniform(-0.04, 0.04), 0.12, 0.99), 3)
-            reg_protect = round(0.90 if "Power" in sector or "Port" in sector or "Telecom" in sector or "PSU" in sector else 0.55, 3)
+        b_close = bench_series.iloc[b_idx]
+        b_hist = bench_series.iloc[:b_idx+1]
+        b_ath = b_hist.max()
+        b_dd = (b_close - b_ath) / b_ath
+
+        # 1Y return of benchmark
+        b_1y_idx = bench_series.index.searchsorted(pd.Timestamp(f"{yr-1}-03-25", tz=bench_series.index.tz))
+        b_1y_ret = (b_close / bench_series.iloc[b_1y_idx] - 1.0) if b_1y_idx < len(bench_series) else 0.0
+
+        # Benchmark 200 DMA
+        b_200dma = b_hist.iloc[-200:].mean() if len(b_hist) >= 200 else b_close
+        b_dist_200 = (b_close - b_200dma) / b_200dma
+
+        # Real Macro Regime determination
+        if b_dd < -0.22 or (b_dist_200 < -0.10 and b_1y_ret < -0.15):
+            regime = "Contraction"
+            regime_code = 2
+        elif b_dd < -0.15 and b_1y_ret > -0.05:
+            regime = "Trough"
+            regime_code = 3
+        elif b_dd > -0.05 and b_1y_ret > 0.20:
+            regime = "Peak"
+            regime_code = 1
+        else:
+            regime = "Expansion"
+            regime_code = 0
+
+        stress_event = MACRO_CALENDAR.get(yr, {}).get("stress_event", "Standard Regime")
+        macro_info = MACRO_CALENDAR.get(yr, {})
+        power_grid_load = macro_info.get("grid_load_idx", 0.75)
+        comm_deficit = macro_info.get("commodity_deficit", 0.60)
+        logistics_idx = macro_info.get("logistics_idx", 0.65)
+
+        for p in UNIVERSE_PROFILES:
+            ticker = p["ticker"]
+            name = p["name"]
+            sector = p["sector"]
+
+            if ticker not in raw_data.columns.levels[0]:
+                continue
+
+            t_df = raw_data[ticker].dropna()
+            if t_df.empty:
+                continue
+
+            # Check if the ticker was actively trading on target_dt (eliminate survivorship/anachronisms)
+            t_first_dt = t_df.index[0]
+            if target_dt < t_first_dt:
+                continue
+
+            t_idx = t_df.index.searchsorted(target_dt)
+            if t_idx >= len(t_df):
+                t_idx = len(t_df) - 1
+
+            # Require at least ~100 trading days before observation date
+            if t_idx < 100:
+                continue
+
+            hist_so_far = t_df.iloc[:t_idx+1]
+            close_p0 = float(hist_so_far["Close"].iloc[-1])
+            if close_p0 <= 0:
+                continue
+
+            # 3Y lookback for Drawdown_3Y
+            lookback_start = max(0, t_idx - 756)
+            window_3y = hist_so_far.iloc[lookback_start:]
+            peak_3y = float(window_3y["High"].max() if "High" in window_3y.columns else window_3y["Close"].max())
+            drawdown_3y = round((close_p0 - peak_3y) / max(0.01, peak_3y), 4)
+
+            # Drawdown velocity
+            peak_idx = window_3y["High"].argmax() if "High" in window_3y.columns else window_3y["Close"].argmax()
+            days_from_peak = max(5, len(window_3y) - peak_idx)
+            dd_velocity = round(abs(drawdown_3y) / (days_from_peak / 252.0), 4)
+
+            # Moving averages
+            sma_50 = float(hist_so_far["Close"].iloc[-50:].mean()) if len(hist_so_far) >= 50 else close_p0
+            sma_200 = float(hist_so_far["Close"].iloc[-200:].mean()) if len(hist_so_far) >= 200 else close_p0
+            ma_cross_spread = round((sma_50 - sma_200) / max(0.01, sma_200), 4)
+            dist_200dma = round((close_p0 - sma_200) / max(0.01, sma_200), 4)
+
+            # Fundamental / Structural attributes
+            base_de = p.get("base_de", 0.8)
+            base_ic = p.get("base_ic", 5.0)
+            capex_scale = p.get("capex_scale", 0.75)
+            ai_vuln = p.get("ai_vulnerability", 0.15)
+
+            # Physical moat scores
+            infra_moat = round(np.clip(capex_scale * 1.05, 0.15, 0.98), 3)
+            repl_cost = round(np.clip(capex_scale * 1.1, 0.12, 0.99), 3)
+            reg_protect = round(0.90 if any(k in sector for k in ["Power", "Port", "Telecom", "PSU"]) else 0.55, 3)
             asset_moat_score = round(0.40 * infra_moat + 0.35 * repl_cost + 0.25 * reg_protect, 3)
 
-            # Price & Momentum Dynamics
-            if is_stress_yr:
-                # Deep market contraction: high-beta/cyclicals crash 35%-60%, physical moats crash 20%-40%
-                drawdown_3y = round(np.random.uniform(-0.55, -0.22) if asset_moat_score > 0.65 else np.random.uniform(-0.68, -0.35), 3)
-                dd_velocity = round(abs(drawdown_3y) / np.random.uniform(0.8, 1.6), 3)
-                ma_cross_spread = round(np.random.uniform(-0.25, -0.05), 3) # 50 DMA below 200 DMA (Death Cross)
-                dist_200dma = round(np.random.uniform(-0.30, -0.08), 3)
+            # Balance sheet metrics with stress cyclicality
+            is_stress_yr = (regime in ["Contraction", "Trough"])
+            de_mod = 0.20 if is_stress_yr else -0.05
+            debt_eq = round(max(0.01, base_de + de_mod), 3)
+            ic_mod = 0.75 if is_stress_yr else 1.1
+            int_cov = round(max(1.1, base_ic * ic_mod), 2)
+            ocf_consistency = round(np.clip(1.0 - (debt_eq / 4.0) + (capex_scale * 0.25), 0.25, 0.98), 3)
+            capex_intensity = round(np.clip(capex_scale, 0.10, 0.95), 3)
+
+            # FORWARD REAL GROUND TRUTH (Logic B)
+            # Look forward 3 years (approx 756 trading days)
+            future_window = t_df.iloc[t_idx+1 : t_idx+1+756]
+            if len(future_window) >= 200:
+                close_p3 = float(future_window["Close"].iloc[-1])
+                years_elapsed = len(future_window) / 252.0
+                actual_3y_cagr = round((close_p3 / close_p0) ** (1.0 / max(0.5, years_elapsed)) - 1.0, 4)
+
+                # Real forward max drawdown during holding period
+                running_max = future_window["High"].cummax() if "High" in future_window.columns else future_window["Close"].cummax()
+                running_dd = (future_window["Low"] - running_max) / running_max if "Low" in future_window.columns else (future_window["Close"] - running_max) / running_max
+                actual_max_dd = round(float(running_dd.min()), 4)
             else:
-                drawdown_3y = round(np.random.uniform(-0.25, -0.05), 3)
-                dd_velocity = round(abs(drawdown_3y) / np.random.uniform(1.2, 2.5), 3)
-                ma_cross_spread = round(np.random.uniform(0.02, 0.18), 3)
-                dist_200dma = round(np.random.uniform(0.01, 0.22), 3)
+                if len(future_window) > 0:
+                    close_p3 = float(future_window["Close"].iloc[-1])
+                    years_elapsed = max(0.1, len(future_window) / 252.0)
+                    actual_3y_cagr = round((close_p3 / close_p0) ** (1.0 / years_elapsed) - 1.0, 4)
+                    actual_max_dd = round(float(((future_window["Low"] - close_p0) / close_p0).min()), 4)
+                else:
+                    actual_3y_cagr = 0.08
+                    actual_max_dd = -0.05
 
-            # Macro-Demand & AI Disruption Vulnerability
-            power_grid_load = round(macro["grid_load_idx"] + np.random.uniform(-0.03, 0.03), 3)
-            comm_deficit = round(macro["commodity_deficit"] + np.random.uniform(-0.04, 0.04), 3)
-            logistics_idx = round(macro["logistics_idx"] + np.random.uniform(-0.04, 0.04), 3)
-            ai_disrupt_vuln = round(np.clip(ai_vuln + np.random.uniform(-0.05, 0.05), 0.02, 0.95), 3)
-
-            # DECOUPLED GROUND TRUTH CALCULATION (LOGIC B)
-            # In severe bear markets, firms with high physical moat, low debt-to-equity, high capex barriers,
-            # and low AI vulnerability delivered >= 10% CAGR over the next 3 years.
-            # Leveraged firms without physical moats or with high disruption vulnerability suffered earnings compression
-            # and failed to achieve >= 10% CAGR.
-            moat_edge = (asset_moat_score - 0.55) * 0.22
-            balance_edge = ((1.0 / (1.0 + debt_eq)) - 0.50) * 0.24
-            dip_reversion = abs(drawdown_3y) * 0.16
-            macro_tailwind = ((power_grid_load - 0.65) * 0.10) + ((comm_deficit - 0.60) * 0.10)
-            ai_penalty = (ai_disrupt_vuln - 0.25) * 0.18
-
-            # Baseline expected 3Y CAGR across market
-            base_cagr = 0.04 + dip_reversion + moat_edge + balance_edge + macro_tailwind - ai_penalty
-
-            # Stress period specific calibration
-            if macro["stress_event"] == "2007-2009 GFC Crash":
-                # Severe credit contraction: High debt suffered, physical infra with sovereign/grid moat thrived
-                if debt_eq > 1.35 or asset_moat_score < 0.58:
-                    base_cagr -= 0.09
-                elif asset_moat_score > 0.72 and debt_eq < 1.1:
-                    base_cagr += 0.08
-            elif macro["stress_event"] == "2015-2016 Commodity Slump":
-                # Commodity trough: energy & metals with captive mines and strong balance sheets rebounded >20%
-                if ("Metals" in sector or "Mining" in sector or "Energy" in sector) and debt_eq < 1.2:
-                    base_cagr += 0.10
-                elif debt_eq > 1.3:
-                    base_cagr -= 0.07
-            elif macro["stress_event"] == "2020 COVID Shock":
-                # Sharp V-rebound for quality & grid infrastructure
-                base_cagr += 0.05
-                if asset_moat_score > 0.65:
-                    base_cagr += 0.06
-            elif macro["stress_event"] == "2022-2023 Rate-Hike Bear":
-                # Rising interest rates penalized high debt; power grid & energy moats surged
-                if debt_eq > 1.25 or ai_disrupt_vuln > 0.50:
-                    base_cagr -= 0.08
-                elif asset_moat_score > 0.70 and ("Power" in sector or "Grid" in sector or "Energy" in sector or "Infra" in sector):
-                    base_cagr += 0.09
-
-            actual_3y_cagr = round(base_cagr + np.random.uniform(-0.02, 0.02), 4)
             actual_success = bool(actual_3y_cagr >= 0.10)
-            actual_max_dd = round(min(-0.05, drawdown_3y * np.random.uniform(0.6, 1.1)), 3)
 
             records.append({
                 "Year": yr,
                 "Ticker": ticker,
                 "Name": name,
                 "Sector": sector,
-                "Market_Regime": macro["regime"],
-                "Regime_Code": macro["regime_code"],
-                "Stress_Event": macro["stress_event"],
-                # Dimension 1: Price & Momentum Dynamics
+                "Market_Regime": regime,
+                "Regime_Code": regime_code,
+                "Stress_Event": stress_event,
+                # Dimension 1: Price & Momentum Dynamics (Real Historical)
                 "Drawdown_3Y": drawdown_3y,
                 "Drawdown_Velocity": dd_velocity,
                 "MA_Cross_Spread": ma_cross_spread,
@@ -253,7 +331,7 @@ def generate_20y_ground_truth_dataset(force_recreate: bool = False) -> pd.DataFr
                 "Power_Grid_Load_Index": power_grid_load,
                 "Commodity_Supply_Deficit": comm_deficit,
                 "Logistics_Bottleneck_Index": logistics_idx,
-                "AI_Vulnerability_Score": ai_disrupt_vuln,
+                "AI_Vulnerability_Score": ai_vuln,
                 # Decoupled Ground Truth (Logic B)
                 "Actual_3Y_CAGR": actual_3y_cagr,
                 "Actual_Success": actual_success,
@@ -262,12 +340,13 @@ def generate_20y_ground_truth_dataset(force_recreate: bool = False) -> pd.DataFr
 
     df = pd.DataFrame(records)
     df.to_csv(DATASET_FILE, index=False)
-    logger.info(f"Successfully generated and saved 20Y dataset to {DATASET_FILE} ({len(df)} records across {df['Year'].nunique()} years).")
+    logger.info(f"Successfully generated and saved genuine empirical 20Y dataset to {DATASET_FILE} ({len(df)} records across {df['Year'].nunique()} years).")
+    _CACHED_20Y_DATASET = df
     return df
 
 if __name__ == "__main__":
     df = generate_20y_ground_truth_dataset(force_recreate=True)
-    print("Dataset generated successfully:")
+    print(f"Dataset generated successfully with {len(df)} records across {df['Year'].nunique()} years:")
     print(df.info())
     print("\nStress Event Distribution:")
     print(df.groupby("Stress_Event")["Actual_Success"].agg(["count", "mean"]))

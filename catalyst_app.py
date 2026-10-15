@@ -17,6 +17,7 @@ import streamlit as st
 import yfinance as yf
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from ticker_utils import match_tickers_in_text
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger("CatalystPulsePro")
@@ -303,7 +304,7 @@ def fetch_corporate_catalysts(active_universe):
                         grp = meta["group"]
                         break
 
-                matched = [sym for sym in known_syms if re.search(rf"\b{sym}\b", full_text, re.IGNORECASE)]
+                matched = match_tickers_in_text(full_text, known_syms)
 
                 sentiment_data = compute_finbert_sentiment(full_text)
                 item = {

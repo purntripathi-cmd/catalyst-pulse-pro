@@ -24,6 +24,7 @@ RUNS_CSV_PATH = os.path.join(DATA_DIR, "dual_logic_runs.csv")
 AGENT_LOG_PATH = os.path.join(DATA_DIR, "dual_logic_agent.log")
 LOCAL_TRADES_CSV = os.path.join(DATA_DIR, "paper_trades.csv")
 AUTO_3PM_LOG_PATH = os.path.join(DATA_DIR, "auto_3pm_trade_log.json")
+MARKET_CACHE_FILE = os.path.join(DATA_DIR, "market_cache.parquet")
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -111,59 +112,77 @@ def fetch_complete_universe_technicals(tickers_tuple):
     if not tickers_tuple:
         return results
     ns_tickers = [f"{t}.NS" if not t.endswith(".NS") else t for t in tickers_tuple]
+    raw_dl = None
     try:
         raw_dl = yf.download(ns_tickers, period="1y", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
-        for t in tickers_tuple:
-            clean = t.replace(".NS", "").strip().upper()
-            ns = f"{clean}.NS"
-            sub = pd.DataFrame()
-            if isinstance(raw_dl.columns, pd.MultiIndex):
-                for cand in [ns, clean]:
-                    if cand in raw_dl.columns.levels[0]:
-                        sub = raw_dl[cand].dropna()
-                        break
-            else:
-                if "Close" in raw_dl.columns:
-                    sub = raw_dl.dropna()
-
-            if not sub.empty and len(sub) >= 5:
-                c, h, l = sub["Close"], sub["High"], sub["Low"]
-                cmp_val = round(float(c.iloc[-1]), 2)
-                l52 = round(float(l.min()), 2)
-                h52 = round(float(h.max()), 2)
-                w_low = round(float(l.iloc[-5:].min()), 2)
-                d_low = round(float(l.iloc[-1]), 2)
-
-                delta = c.diff()
-                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rs = gain / loss.replace(0, np.nan)
-                rsi_series = 100.0 - (100.0 / (1.0 + rs))
-                rsi_val = round(float(rsi_series.iloc[-1]), 1) if len(c) >= 15 else 48.0
-                if np.isnan(rsi_val):
-                    rsi_val = 48.0
-
-                d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
-                dist_200 = round(((cmp_val - d200) / max(0.01, d200)) * 100.0, 2)
-
-                rec = {
-                    "Ticker": clean,
-                    "CMP (₹)": cmp_val,
-                    "52W Low (₹)": l52,
-                    "52W High (₹)": h52,
-                    "Dist 52W High %": round(((cmp_val - h52) / max(1.0, h52)) * 100.0, 2),
-                    "Dist 52W Low %": round(((cmp_val - l52) / max(1.0, l52)) * 100.0, 2),
-                    "Weekly Low (₹)": w_low,
-                    "Dist Weekly Low %": round(((cmp_val - w_low) / max(1.0, w_low)) * 100.0, 2),
-                    "Today Low (₹)": d_low,
-                    "Dist Today Low %": round(((cmp_val - d_low) / max(1.0, d_low)) * 100.0, 2),
-                    "RSI (14D)": rsi_val,
-                    "Dist 200DMA %": dist_200
-                }
-                results[clean] = rec
-                results[ns] = rec
+        if raw_dl is not None and not raw_dl.empty and len(raw_dl) > 10:
+            try:
+                raw_dl.to_parquet(MARKET_CACHE_FILE)
+            except Exception:
+                pass
     except Exception as e:
-        logger.warning(f"Error in fetch_complete_universe_technicals: {e}")
+        logger.warning(f"yfinance download in technicals failed: {e}")
+
+    if (raw_dl is None or raw_dl.empty) and os.path.exists(MARKET_CACHE_FILE):
+        try:
+            raw_dl = pd.read_parquet(MARKET_CACHE_FILE)
+            logger.info("Loaded universe technicals from market_cache.parquet snapshot.")
+        except Exception:
+            pass
+
+    if raw_dl is not None and not raw_dl.empty:
+        try:
+            for t in tickers_tuple:
+                clean = t.replace(".NS", "").strip().upper()
+                ns = f"{clean}.NS"
+                sub = pd.DataFrame()
+                if isinstance(raw_dl.columns, pd.MultiIndex):
+                    for cand in [ns, clean]:
+                        if cand in raw_dl.columns.levels[0]:
+                            sub = raw_dl[cand].dropna()
+                            break
+                else:
+                    if "Close" in raw_dl.columns:
+                        sub = raw_dl.dropna()
+
+                if not sub.empty and len(sub) >= 5:
+                    c, h, l = sub["Close"], sub["High"], sub["Low"]
+                    cmp_val = round(float(c.iloc[-1]), 2)
+                    l52 = round(float(l.min()), 2)
+                    h52 = round(float(h.max()), 2)
+                    w_low = round(float(l.iloc[-5:].min()), 2)
+                    d_low = round(float(l.iloc[-1]), 2)
+
+                    delta = c.diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                    rs = gain / loss.replace(0, np.nan)
+                    rsi_series = 100.0 - (100.0 / (1.0 + rs))
+                    rsi_val = round(float(rsi_series.iloc[-1]), 1) if len(c) >= 15 else 48.0
+                    if np.isnan(rsi_val):
+                        rsi_val = 48.0
+
+                    d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                    dist_200 = round(((cmp_val - d200) / max(0.01, d200)) * 100.0, 2)
+
+                    rec = {
+                        "Ticker": clean,
+                        "CMP (₹)": cmp_val,
+                        "52W Low (₹)": l52,
+                        "52W High (₹)": h52,
+                        "Dist 52W High %": round(((cmp_val - h52) / max(1.0, h52)) * 100.0, 2),
+                        "Dist 52W Low %": round(((cmp_val - l52) / max(1.0, l52)) * 100.0, 2),
+                        "Weekly Low (₹)": w_low,
+                        "Dist Weekly Low %": round(((cmp_val - w_low) / max(1.0, w_low)) * 100.0, 2),
+                        "Today Low (₹)": d_low,
+                        "Dist Today Low %": round(((cmp_val - d_low) / max(1.0, d_low)) * 100.0, 2),
+                        "RSI (14D)": rsi_val,
+                        "Dist 200DMA %": dist_200
+                    }
+                    results[clean] = rec
+                    results[ns] = rec
+        except Exception as e:
+            logger.warning(f"Error computing technicals: {e}")
     return results
 
 
@@ -2045,7 +2064,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
     watch_pct = (len(watch_picks) / tot_c) * 100
 
     # Dynamic 20Y Out-of-Sample Win Rate from locked engine findings
-    win_rate_20y_str = "93.1%"
+    win_rate_20y_str = "52.9%"
     if os.path.exists(FINDINGS_JSON_PATH):
         try:
             with open(FINDINGS_JSON_PATH, "r", encoding="utf-8") as f:
@@ -2053,8 +2072,10 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
                 vm = f_data.get("validation_matrix", [])
                 for row in vm:
                     if "Full 20Y" in row.get("Market Cycle / Stress Period", ""):
-                        win_rate_20y_str = row.get("Optimized & Locked Win Rate", "93.1%")
+                        win_rate_20y_str = row.get("Optimized & Locked Win Rate", win_rate_20y_str)
                         break
+                if not win_rate_20y_str and "win_rate" in f_data:
+                    win_rate_20y_str = f"{f_data['win_rate'] * 100:.1f}%"
         except Exception:
             pass
 

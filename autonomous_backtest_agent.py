@@ -135,8 +135,14 @@ def apply_findings_to_app(user: str = "Autonomous_DualLogic_Agent") -> dict:
         }
 
         # 2. Also enhance "Long-Term Secular" and "Default" with the deep-value moat weights
-        cfg["weights"]["Long-Term"]["w_dma"] = int(opt_weights.get("drawdown", 0.25) * 100)
-        cfg["weights"]["Long-Term"]["w_div"] = int(opt_weights.get("asset_moat", 0.25) * 100)
+        if "Long-Term" in cfg["weights"]:
+            cfg["weights"]["Long-Term"]["w_dma"] = int(opt_weights.get("drawdown", 0.25) * 100)
+            cfg["weights"]["Long-Term"]["w_div"] = int(opt_weights.get("asset_moat", 0.25) * 100)
+        else:
+            cfg["weights"]["Long-Term"] = {
+                "w_dma": int(opt_weights.get("drawdown", 0.25) * 100),
+                "w_div": int(opt_weights.get("asset_moat", 0.25) * 100)
+            }
 
         cfg["dual_logic_v4_2"] = {
             "is_locked": findings.get("is_locked", True),

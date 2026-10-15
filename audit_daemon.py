@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 import feedparser
 import numpy as np
+from ticker_utils import match_tickers_in_text
 
 IST = ZoneInfo("Asia/Kolkata")
 file_path = "catalyst_prediction_ledger.csv"
@@ -17,7 +18,8 @@ ledger = pd.read_csv(file_path) if os.path.exists(file_path) else pd.DataFrame()
 changed = False
 
 if not ledger.empty and "Outcome_Status" in ledger.columns:
-    pending = ledger[ledger["Outcome_Status"] == "PENDING"]
+    pending_mask = ledger["Outcome_Status"].isin(["PENDING", "OPEN"])
+    pending = ledger[pending_mask]
     if not pending.empty:
         clean_tickers = [str(t).replace(".NS", "").strip() for t in pending["Ticker"].unique()]
         ticker_list = [f"{t}.NS" for t in clean_tickers]
@@ -27,62 +29,113 @@ if not ledger.empty and "Outcome_Status" in ledger.columns:
 
         if not raw_audit.empty:
             for idx, row in ledger.iterrows():
-                if row["Outcome_Status"] != "PENDING":
+                if row["Outcome_Status"] not in ["PENDING", "OPEN"]:
                     continue
 
                 clean_t = str(row["Ticker"]).replace(".NS", "").strip()
                 ns_sym = f"{clean_t}.NS"
 
-                hist = pd.Series(dtype=float)
+                bars = pd.DataFrame()
                 if isinstance(raw_audit.columns, pd.MultiIndex):
                     for sym_cand in [ns_sym, clean_t]:
                         if sym_cand in raw_audit.columns.levels[0]:
-                            hist = raw_audit[sym_cand]["Close"].dropna()
+                            bars = raw_audit[sym_cand].dropna(subset=["Close"])
                             break
                 else:
                     if "Close" in raw_audit.columns:
-                        hist = raw_audit["Close"].dropna()
+                        bars = raw_audit.dropna(subset=["Close"])
 
-                if not hist.empty:
-                    curr_p = float(hist.iloc[-1])
+                if not bars.empty:
                     init_p = float(row["CMP_At_Prediction"])
-
-                    pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
-                    is_bullish = ("BULLISH" in pred_type)
-
-                    if is_bullish:
-                        ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
-                    else:
-                        ret_pct = round(((init_p - curr_p) / init_p) * 100.0, 2)
-
                     clean_date_str = str(row["Date"]).replace(" IST", "").strip()[:10]
-                    hist_date_strs = hist.index.strftime("%Y-%m-%d")
-                    post = hist[hist_date_strs >= clean_date_str]
+                    hist_date_strs = bars.index.strftime("%Y-%m-%d")
+                    post = bars[hist_date_strs >= clean_date_str]
                     days = max(0, len(post) - 1)
 
-                    ledger.at[idx, "Current_CMP"] = curr_p
-                    ledger.at[idx, "Realized_Return_Pct"] = ret_pct
-                    ledger.at[idx, "Days_Elapsed"] = days
-                    changed = True
+                    curr_p = float(bars["Close"].iloc[-1])
+                    pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
+                    is_bullish = ("BULLISH" in pred_type)
 
                     target_days = int(row.get("Target_Days", 8)) if not pd.isna(row.get("Target_Days")) else 8
                     max_allowed_days = target_days + 2
 
-                    if days >= 1:
-                        if is_bullish:
-                            target_ret = float(row.get("Target_Return_Pct", 4.5))
-                            stop_ret = float(row.get("Stop_Loss_Pct", -2.5))
-                            if ret_pct >= target_ret:
-                                ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                            elif ret_pct <= stop_ret or days >= max_allowed_days:
-                                ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
-                        else:
-                            target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
-                            stop_loss_hit = ret_pct <= -abs(float(row.get("Stop_Loss_Pct", 2.5)))
-                            if ret_pct >= target_gain:
-                                ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                            elif stop_loss_hit or days >= max_allowed_days:
-                                ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
+                    evaluated_status = None
+                    realized_ret = None
+                    exit_p = curr_p
+                    elapsed_days = days
+
+                    if is_bullish:
+                        target_ret = float(row.get("Target_Return_Pct", 4.5))
+                        stop_ret = float(row.get("Stop_Loss_Pct", -2.5))
+                        target_p = init_p * (1.0 + target_ret / 100.0)
+                        stop_p = init_p * (1.0 + stop_ret / 100.0)
+
+                        if len(post) > 1:
+                            for b_idx, (b_date, b_row) in enumerate(post.iloc[1:].iterrows(), start=1):
+                                b_high = float(b_row.get("High", b_row["Close"]))
+                                b_low = float(b_row.get("Low", b_row["Close"]))
+
+                                # Stop loss evaluated first for risk conservatism
+                                if b_low <= stop_p:
+                                    evaluated_status = "FAILED"
+                                    realized_ret = stop_ret
+                                    exit_p = stop_p
+                                    elapsed_days = b_idx
+                                    break
+                                elif b_high >= target_p:
+                                    evaluated_status = "SUCCESS"
+                                    realized_ret = target_ret
+                                    exit_p = target_p
+                                    elapsed_days = b_idx
+                                    break
+
+                        if evaluated_status is None:
+                            curr_ret = round(((curr_p - init_p) / init_p) * 100.0, 2)
+                            if days >= max_allowed_days:
+                                evaluated_status = "SUCCESS" if curr_ret > 0 else "FAILED"
+                                realized_ret = curr_ret
+                                exit_p = curr_p
+                            else:
+                                realized_ret = curr_ret
+                    else:
+                        target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
+                        stop_loss_pct = abs(float(row.get("Stop_Loss_Pct", 2.5)))
+                        target_p = init_p * (1.0 - target_gain / 100.0)
+                        stop_p = init_p * (1.0 + stop_loss_pct / 100.0)
+
+                        if len(post) > 1:
+                            for b_idx, (b_date, b_row) in enumerate(post.iloc[1:].iterrows(), start=1):
+                                b_high = float(b_row.get("High", b_row["Close"]))
+                                b_low = float(b_row.get("Low", b_row["Close"]))
+
+                                if b_high >= stop_p:
+                                    evaluated_status = "FAILED"
+                                    realized_ret = -stop_loss_pct
+                                    exit_p = stop_p
+                                    elapsed_days = b_idx
+                                    break
+                                elif b_low <= target_p:
+                                    evaluated_status = "SUCCESS"
+                                    realized_ret = target_gain
+                                    exit_p = target_p
+                                    elapsed_days = b_idx
+                                    break
+
+                        if evaluated_status is None:
+                            curr_ret = round(((init_p - curr_p) / init_p) * 100.0, 2)
+                            if days >= max_allowed_days:
+                                evaluated_status = "SUCCESS" if curr_ret > 0 else "FAILED"
+                                realized_ret = curr_ret
+                                exit_p = curr_p
+                            else:
+                                realized_ret = curr_ret
+
+                    ledger.at[idx, "Current_CMP"] = exit_p
+                    ledger.at[idx, "Realized_Return_Pct"] = realized_ret
+                    ledger.at[idx, "Days_Elapsed"] = elapsed_days
+                    if evaluated_status:
+                        ledger.at[idx, "Outcome_Status"] = evaluated_status
+                    changed = True
 
 # =====================================================================
 # 2. Daily Automatic Screening & Prediction Logging
@@ -140,20 +193,38 @@ for url in RSS_FEEDS:
         f = feedparser.parse(url)
         for entry in f.entries[:30]:
             txt = f"{entry.get('title', '')} {entry.get('summary', '')}"
-            for sym in NIFTY_UNIVERSE:
-                if re.search(rf"\b{sym}\b", txt, re.IGNORECASE):
-                    badge, mult, p1 = "⚡ Technical Baseline", 1.0, 50
-                    for c_name, (rgx, m, p) in CATALYST_RULES.items():
-                        if rgx.search(txt):
-                            badge, mult, p1 = c_name, m, p
-                            break
-                    matched_news[sym] = {"catalyst": badge, "mult": mult, "p1": p1}
+            matched_syms = match_tickers_in_text(txt, NIFTY_UNIVERSE)
+            for sym in matched_syms:
+                badge, mult, p1 = "⚡ Technical Baseline", 1.0, 50
+                for c_name, (rgx, m, p) in CATALYST_RULES.items():
+                    if rgx.search(txt):
+                        badge, mult, p1 = c_name, m, p
+                        break
+                matched_news[sym] = {"catalyst": badge, "mult": mult, "p1": p1}
     except Exception:
         pass
 
 print("Fetching universe market data...")
 dl_list = [f"{s}.NS" for s in NIFTY_UNIVERSE]
-raw_market = yf.download(dl_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True)
+market_cache_file = os.path.join("data", "market_cache.parquet")
+raw_market = None
+try:
+    raw_market = yf.download(dl_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True)
+    if raw_market is not None and not raw_market.empty:
+        os.makedirs("data", exist_ok=True)
+        try:
+            raw_market.to_parquet(market_cache_file)
+        except Exception:
+            pass
+except Exception as e_dl:
+    print(f"yfinance download notice: {e_dl}")
+
+if (raw_market is None or raw_market.empty) and os.path.exists(market_cache_file):
+    try:
+        print("Loading market data from local parquet cache...")
+        raw_market = pd.read_parquet(market_cache_file)
+    except Exception as e_c:
+        print(f"Market cache load error: {e_c}")
 
 candidate_rows = []
 for sym in NIFTY_UNIVERSE:
@@ -332,18 +403,39 @@ try:
                         
                         e_p = float(p_row.get("Entry_Price", 0.0))
                         qty = int(p_row.get("Executed_Qty", 1))
+                        sl = float(p_row.get("Stop_Loss", 0.0))
+                        tp = float(p_row.get("Target", 0.0))
+
+                        pnl_rs = round((c_cmp - e_p) * qty, 2)
+                        pnl_pct = round(((c_cmp - e_p) / e_p) * 100.0, 2) if e_p > 0 else 0.0
+
                         pt_df.at[p_idx, "Live_CMP"] = c_cmp
                         pt_df.at[p_idx, "Current_Value"] = round(qty * c_cmp, 2)
-                        pt_df.at[p_idx, "PnL_Rs"] = round((c_cmp - e_p) * qty, 2)
-                        pt_df.at[p_idx, "PnL_Pct"] = round(((c_cmp - e_p) / e_p) * 100.0, 2) if e_p > 0 else 0.0
+                        pt_df.at[p_idx, "PnL_Rs"] = pnl_rs
+                        pt_df.at[p_idx, "PnL_Pct"] = pnl_pct
+
+                        # Check lifecycle exit triggers
+                        if sl > 0 and c_cmp <= sl:
+                            pt_df.at[p_idx, "Status"] = "CLOSED"
+                            pt_df.at[p_idx, "Exit_Price"] = c_cmp
+                            pt_df.at[p_idx, "Exit_Reason"] = "STOP_LOSS_HIT"
+                            pt_df.at[p_idx, "Exit_Timestamp"] = now_ist_str
+                        elif tp > 0 and c_cmp >= tp:
+                            pt_df.at[p_idx, "Status"] = "CLOSED"
+                            pt_df.at[p_idx, "Exit_Price"] = c_cmp
+                            pt_df.at[p_idx, "Exit_Reason"] = "TARGET_REACHED"
+                            pt_df.at[p_idx, "Exit_Timestamp"] = now_ist_str
+
                     pt_df.to_csv(trades_path, index=False)
-                    print("Successfully refreshed mark-to-market values in data/paper_trades.csv.")
+                    print("Successfully refreshed mark-to-market values and evaluated lifecycle exits in data/paper_trades.csv.")
             except Exception as e_pt:
                 print(f"Paper trades MTM update notice: {e_pt}")
 
         # Stage data files for git commit
         try:
-            subprocess.run(["git", "add", "catalyst_prediction_ledger.csv", "data/paper_trades.csv", "data/auto_3pm_trade_log.json", "data/dual_logic_findings.json"], check=False)
+            files_to_add = [f for f in ["catalyst_prediction_ledger.csv", "data/paper_trades.csv", "data/auto_3pm_trade_log.json", "data/dual_logic_findings.json", "data/dual_logic_state.json"] if os.path.exists(f)]
+            if files_to_add:
+                subprocess.run(["git", "add"] + files_to_add, check=False)
         except Exception:
             pass
 except Exception as ex_dl:
