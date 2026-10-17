@@ -279,12 +279,19 @@ else:
         s_trend = 15.0 if dist_200 > 0 else -15.0
         final_score = round(((s_runup * 0.35) + (s_vol * 0.45) + (s_trend * 0.20)) * cat_data["mult"], 1)
 
-        prob_1w = int(round(calibrate_empirical_probability(
-            score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
-            outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
-            market_regime="Sideways / Rangebound",
-            ticker=sym
-        )))
+        try:
+            prob_1w = int(round(calibrate_empirical_probability(
+                score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
+                outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
+                market_regime="Sideways / Rangebound",
+                ticker=sym
+            )))
+        except TypeError:
+            prob_1w = int(round(calibrate_empirical_probability(
+                score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
+                outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
+                market_regime="Sideways / Rangebound"
+            )))
 
         if final_score >= 18.0 and prob_1w >= 52:
             outlook = "BULLISH"

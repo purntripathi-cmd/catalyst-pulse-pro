@@ -20,26 +20,32 @@ from sklearn.metrics.pairwise import cosine_similarity
 import sys
 import importlib
 
-# Safely import ticker_utils and handle Streamlit Cloud sys.modules caching
+# Safely import and reload local modules to handle Streamlit Cloud sys.modules hot-reload caching
 try:
-    if "ticker_utils" in sys.modules and not hasattr(sys.modules["ticker_utils"], "is_fno_eligible"):
-        del sys.modules["ticker_utils"]
-        importlib.invalidate_caches()
+    importlib.invalidate_caches()
+    for _mod_name in ["ticker_utils", "dual_logic_engine", "dual_logic_ui"]:
+        if _mod_name in sys.modules:
+            try:
+                importlib.reload(sys.modules[_mod_name])
+            except Exception:
+                del sys.modules[_mod_name]
 except Exception:
     pass
 
 try:
-    if "ticker_utils" in sys.modules and not hasattr(sys.modules["ticker_utils"], "is_fno_eligible"):
-        del sys.modules["ticker_utils"]
-        importlib.invalidate_caches()
     import ticker_utils
-    if not hasattr(ticker_utils, "is_fno_eligible"):
+    if not hasattr(ticker_utils, "get_empirical_ticker_memory"):
         importlib.reload(ticker_utils)
         
     match_tickers_in_text = ticker_utils.match_tickers_in_text
     is_fno_eligible = ticker_utils.is_fno_eligible
     get_action_recommendation = ticker_utils.get_action_recommendation
-    calibrate_empirical_probability = ticker_utils.calibrate_empirical_probability
+    _raw_calibrate_prob = ticker_utils.calibrate_empirical_probability
+    def calibrate_empirical_probability(score: float, vol_surge: float = 1.0, runup_5d: float = 0.0, outlook: str = "BULLISH", market_regime: str = "Sideways", ticker: str = None, **kwargs) -> float:
+        try:
+            return _raw_calibrate_prob(score=score, vol_surge=vol_surge, runup_5d=runup_5d, outlook=outlook, market_regime=market_regime, ticker=ticker)
+        except TypeError:
+            return _raw_calibrate_prob(score=score, vol_surge=vol_surge, runup_5d=runup_5d, outlook=outlook, market_regime=market_regime)
     evaluate_trade_lifecycle = ticker_utils.evaluate_trade_lifecycle
     ROUND_TRIP_FRICTION_PCT = getattr(ticker_utils, "ROUND_TRIP_FRICTION_PCT", 0.35)
 except Exception as _import_err:
@@ -76,7 +82,7 @@ except Exception as _import_err:
                 return "⚠️ CASH AVOID / EXIT (Long Square-Off)"
         return "🟡 NEUTRAL / MONITOR"
 
-    def calibrate_empirical_probability(score: float, vol_surge: float = 1.0, runup_5d: float = 0.0, outlook: str = "BULLISH", market_regime: str = "Sideways") -> float:
+    def calibrate_empirical_probability(score: float, vol_surge: float = 1.0, runup_5d: float = 0.0, outlook: str = "BULLISH", market_regime: str = "Sideways", ticker: str = None, **kwargs) -> float:
         is_bull = "BULLISH" in str(outlook).upper()
         logit = 0.1627 + (0.0222 * float(score))
         if is_bull:
@@ -752,14 +758,23 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         final_catalyst_score = round(raw_score * impact_mult, 1)
 
         temp_outlook = "BULLISH" if final_catalyst_score > 0 else "BEARISH_FADE"
-        prob_1w = int(round(calibrate_empirical_probability(
-            score=final_catalyst_score,
-            vol_surge=vol_surge_ratio,
-            runup_5d=runup_5d,
-            outlook=temp_outlook,
-            market_regime="Sideways",
-            ticker=clean_sym
-        )))
+        try:
+            prob_1w = int(round(calibrate_empirical_probability(
+                score=final_catalyst_score,
+                vol_surge=vol_surge_ratio,
+                runup_5d=runup_5d,
+                outlook=temp_outlook,
+                market_regime="Sideways",
+                ticker=clean_sym
+            )))
+        except TypeError:
+            prob_1w = int(round(calibrate_empirical_probability(
+                score=final_catalyst_score,
+                vol_surge=vol_surge_ratio,
+                runup_5d=runup_5d,
+                outlook=temp_outlook,
+                market_regime="Sideways"
+            )))
         prob_2w = int(round(np.clip(prob_1w * 1.05 if prob_1w > 50 else prob_1w * 0.95, 18, 68)))
 
         if final_catalyst_score >= 18.0 and prob_1w >= 52:
