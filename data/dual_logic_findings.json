@@ -167,7 +167,7 @@
     },
     "timestamp": "2026-10-17 13:39:25 IST"
   },
-  "last_updated_ist": "2026-10-17 15:13:43 IST",
+  "last_updated_ist": "2026-10-17 17:00:38 IST",
   "cadence": "Daily 3:00 PM Scheduled (Runs Mon-Fri via GitHub Actions even when app is closed)",
   "top_candidates_count": 36,
   "high_conviction_count": 7,
@@ -714,51 +714,8 @@
     }
   ],
   "auto_3pm_last_run": {
-    "status": "SUCCESS",
-    "message": "3:00 PM Auto-Trade executed 0 new stocks (\u20b950K each), ignored 14 duplicates.",
-    "executed_count": 0,
-    "skipped_duplicate_count": 14,
-    "executed_trades": [],
-    "skipped_duplicates": [
-      "GOLDBEES",
-      "ITC",
-      "CONCOR",
-      "ONGC",
-      "HINDUNILVR",
-      "COALINDIA",
-      "SIEMENS",
-      "ABB",
-      "ULTRACEMCO",
-      "CPSEETF",
-      "RELIANCE",
-      "SUNPHARMA",
-      "IOC",
-      "HINDALCO"
-    ],
-    "timestamp": "2026-10-17 15:13:43 IST",
-    "log": {
-      "last_run_date": "2026-10-17",
-      "last_run_timestamp": "2026-10-17 15:13:43 IST",
-      "trigger": "Manual_Force_Run",
-      "executed_count": 0,
-      "skipped_duplicate_count": 14,
-      "executed_tickers": [],
-      "skipped_tickers": [
-        "GOLDBEES",
-        "ITC",
-        "CONCOR",
-        "ONGC",
-        "HINDUNILVR",
-        "COALINDIA",
-        "SIEMENS",
-        "ABB",
-        "ULTRACEMCO",
-        "CPSEETF",
-        "RELIANCE",
-        "SUNPHARMA",
-        "IOC",
-        "HINDALCO"
-      ]
-    }
+    "status": "SKIPPED_WEEKEND",
+    "message": "Weekend Guard Active: Markets closed today (Saturday). Automated paper trades strictly run Monday\u2013Friday.",
+    "timestamp": "2026-10-17 17:00:28 IST"
   }
 }

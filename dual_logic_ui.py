@@ -864,10 +864,11 @@ def render_active_long_term_portfolio_snapshot_section(
         st.markdown("<hr style='margin-top: 1.0rem; margin-bottom: 1.0rem;' />", unsafe_allow_html=True)
 
 
-def auto_execute_3pm_dual_logic_trades(candidates_df=None, current_user="Auto_3PM_Daemon", base_budget=50000.0, force_run=False):
+def auto_execute_3pm_dual_logic_trades(candidates_df=None, current_user="Auto_3PM_Daemon", base_budget=50000.0, force_run=False, allow_weekend_testing=False):
     """
     Executes automated paper trades at 3:00 PM IST every working day (Monday - Friday).
     Strictly ignores duplicates: only allocates ₹50,000 if the stock is not already held.
+    Strictly halts on weekends (Saturday & Sunday IST) to prevent trade logging on stale prices.
     Returns a status dictionary detailing executed trades, skipped duplicates, and timestamps.
     """
     try:
@@ -892,14 +893,16 @@ def auto_execute_3pm_dual_logic_trades(candidates_df=None, current_user="Auto_3P
 
     last_run_date = log_data.get("last_run_date", "")
 
+    # Strict Weekend Guard: Never execute live paper trades on Saturday or Sunday
+    if not is_weekday and not allow_weekend_testing:
+        return {
+            "status": "SKIPPED_WEEKEND",
+            "message": f"Weekend Guard Active: Indian Stock Exchanges (NSE/BSE) are closed today ({now_ist.strftime('%A')}). Automated paper trades strictly run Monday–Friday at 3:00 PM IST.",
+            "timestamp": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
+            "log": log_data
+        }
+
     if not force_run:
-        if not is_weekday:
-            return {
-                "status": "SKIPPED_WEEKEND",
-                "message": f"Weekend: Markets are closed today ({now_ist.strftime('%A')}). Automated trades run Mon-Fri at 3:00 PM IST.",
-                "timestamp": now_ist.strftime("%Y-%m-%d %H:%M:%S IST"),
-                "log": log_data
-            }
         if not is_after_3pm:
             return {
                 "status": "WAITING_FOR_3PM",

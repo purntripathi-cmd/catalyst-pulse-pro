@@ -161,190 +161,194 @@ now_ist = datetime.datetime.now(IST)
 today_str = now_ist.strftime("%Y-%m-%d")
 timestamp_str = now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
 
-# Avoid duplicate runs on the same date
-existing_preds = set(ledger["Prediction_ID"].values) if not ledger.empty and "Prediction_ID" in ledger.columns else set()
+is_weekend = (now_ist.weekday() >= 5)  # 5 = Saturday, 6 = Sunday
+if is_weekend:
+    print(f"[WEEKEND GUARD] Today is {now_ist.strftime('%A')} ({today_str}). Indian stock exchanges (NSE/BSE) are closed on weekends. Halting new prediction screening & paper trade generation.")
+else:
+    # Avoid duplicate runs on the same date
+    existing_preds = set(ledger["Prediction_ID"].values) if not ledger.empty and "Prediction_ID" in ledger.columns else set()
 
-NIFTY_UNIVERSE = [
-    "ABB", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS", "ADANIPOWER",
-    "AMBUJACEM", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJFINANCE",
-    "BAJAJFINSV", "BAJAJHLDNG", "BANKBARODA", "BEL", "BHEL", "BPCL", "BHARTIARTL",
-    "BOSCHLTD", "BRITANNIA", "CANBK", "CHOLAFIN", "CIPLA", "COALINDIA", "COLPAL",
-    "DLF", "DABUR", "DIVISLAB", "DIXON", "DRREDDY", "EICHERMOT", "GAIL", "GODREJCP",
-    "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HAVELLS", "HEROMOTOCO", "HINDALCO",
-    "HAL", "HINDUNILVR", "ICICIBANK", "ICICIGI", "ICICIPRULI", "ITC", "INDHOTEL",
-    "IOC", "IRCTC", "IRFC", "INDUSINDBK", "NAUKRI", "INFY", "INDIGO", "JSWSTEEL",
-    "JINDALSTEL", "JIOFIN", "KOTAKBANK", "LTIM", "LT", "LUPIN", "M&M", "MARICO",
-    "MARUTI", "MAXHEALTH", "NTPC", "NESTLEIND", "ONGC", "PIDILITIND", "PFC",
-    "POWERGRID", "PNB", "RECLTD", "RELIANCE", "SBICARD", "SBILIFE", "SRF",
-    "MOTHERSON", "SHREECEM", "SHRIRAMFIN", "SIEMENS", "SBIN", "SUNPHARMA",
-    "TVSMOTOR", "TCS", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL",
-    "TECHM", "TITAN", "TORNTPOWER", "TRENT", "ULTRACEMCO", "UNITDSPR", "VBL",
-    "VEDL", "WIPRO", "ZOMATO", "ZYDUSLIFE"
-]
+    NIFTY_UNIVERSE = [
+        "ABB", "ADANIENSOL", "ADANIENT", "ADANIGREEN", "ADANIPORTS", "ADANIPOWER",
+        "AMBUJACEM", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BAJAJ-AUTO", "BAJFINANCE",
+        "BAJAJFINSV", "BAJAJHLDNG", "BANKBARODA", "BEL", "BHEL", "BPCL", "BHARTIARTL",
+        "BOSCHLTD", "BRITANNIA", "CANBK", "CHOLAFIN", "CIPLA", "COALINDIA", "COLPAL",
+        "DLF", "DABUR", "DIVISLAB", "DIXON", "DRREDDY", "EICHERMOT", "GAIL", "GODREJCP",
+        "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HAVELLS", "HEROMOTOCO", "HINDALCO",
+        "HAL", "HINDUNILVR", "ICICIBANK", "ICICIGI", "ICICIPRULI", "ITC", "INDHOTEL",
+        "IOC", "IRCTC", "IRFC", "INDUSINDBK", "NAUKRI", "INFY", "INDIGO", "JSWSTEEL",
+        "JINDALSTEL", "JIOFIN", "KOTAKBANK", "LTIM", "LT", "LUPIN", "M&M", "MARICO",
+        "MARUTI", "MAXHEALTH", "NTPC", "NESTLEIND", "ONGC", "PIDILITIND", "PFC",
+        "POWERGRID", "PNB", "RECLTD", "RELIANCE", "SBICARD", "SBILIFE", "SRF",
+        "MOTHERSON", "SHREECEM", "SHRIRAMFIN", "SIEMENS", "SBIN", "SUNPHARMA",
+        "TVSMOTOR", "TCS", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL",
+        "TECHM", "TITAN", "TORNTPOWER", "TRENT", "ULTRACEMCO", "UNITDSPR", "VBL",
+        "VEDL", "WIPRO", "ZOMATO", "ZYDUSLIFE"
+    ]
 
-CATALYST_RULES = {
-    "Demerger / Merger Unlock": (re.compile(r"(?:demerger|spin-?off|scheme of arrangement|merger|amalgamation)", re.IGNORECASE), 1.35, 72),
-    "Mega Order Win / Contract": (re.compile(r"(?:bagged|awarded|receives?|secures?|wins?)\s+(?:an?\s+)?(?:order|contract|project)", re.IGNORECASE), 1.20, 66),
-    "Capex / Plant Expansion": (re.compile(r"(?:commercial production|capacity expansion|capex|new plant|new facility)", re.IGNORECASE), 1.10, 62),
-    "USFDA Inspection / EIR Clearance": (re.compile(r"(?:usfda|establishment inspection report|eir|form 483|warning letter|zero observations|v-?a-?i)", re.IGNORECASE), 1.30, 70),
-    "Credit Rating Upgrade / Revision": (re.compile(r"(?:crisil|icra|care ratings?|india ratings?).*(?:upgrade|revises? outlook|reaffirms?|positive)", re.IGNORECASE), 1.15, 64),
-    "SEBI SAST Promoter Pledging Revocation": (re.compile(r"(?:pledge revocation|release of pledge|promoter pledge|encumbrance)", re.IGNORECASE), 1.25, 68),
-    "QIP / Institutional Placement": (re.compile(r"(?:qip|qualified institutional placement|preferential allotment|block deal)", re.IGNORECASE), 1.18, 65),
-    "Strategic Joint Venture": (re.compile(r"(?:strategic partnership|joint venture|mou signed|collaborat)", re.IGNORECASE), 1.12, 63),
-    "Dividend & Buyback": (re.compile(r"(?:interim dividend|final dividend|special dividend|buyback)", re.IGNORECASE), 0.85, 46),
-    "Bonus / Split / Rights Issue": (re.compile(r"(?:sub-division|split of face value|bonus issue|bonus shares)", re.IGNORECASE), 0.70, 40),
-    "Regulatory / Governance Warning": (re.compile(r"(?:resignation of auditor|cbi|ed search|seizure|enforcement|show cause notice|fraud)", re.IGNORECASE), -1.60, 22),
-}
+    CATALYST_RULES = {
+        "Demerger / Merger Unlock": (re.compile(r"(?:demerger|spin-?off|scheme of arrangement|merger|amalgamation)", re.IGNORECASE), 1.35, 72),
+        "Mega Order Win / Contract": (re.compile(r"(?:bagged|awarded|receives?|secures?|wins?)\s+(?:an?\s+)?(?:order|contract|project)", re.IGNORECASE), 1.20, 66),
+        "Capex / Plant Expansion": (re.compile(r"(?:commercial production|capacity expansion|capex|new plant|new facility)", re.IGNORECASE), 1.10, 62),
+        "USFDA Inspection / EIR Clearance": (re.compile(r"(?:usfda|establishment inspection report|eir|form 483|warning letter|zero observations|v-?a-?i)", re.IGNORECASE), 1.30, 70),
+        "Credit Rating Upgrade / Revision": (re.compile(r"(?:crisil|icra|care ratings?|india ratings?).*(?:upgrade|revises? outlook|reaffirms?|positive)", re.IGNORECASE), 1.15, 64),
+        "SEBI SAST Promoter Pledging Revocation": (re.compile(r"(?:pledge revocation|release of pledge|promoter pledge|encumbrance)", re.IGNORECASE), 1.25, 68),
+        "QIP / Institutional Placement": (re.compile(r"(?:qip|qualified institutional placement|preferential allotment|block deal)", re.IGNORECASE), 1.18, 65),
+        "Strategic Joint Venture": (re.compile(r"(?:strategic partnership|joint venture|mou signed|collaborat)", re.IGNORECASE), 1.12, 63),
+        "Dividend & Buyback": (re.compile(r"(?:interim dividend|final dividend|special dividend|buyback)", re.IGNORECASE), 0.85, 46),
+        "Bonus / Split / Rights Issue": (re.compile(r"(?:sub-division|split of face value|bonus issue|bonus shares)", re.IGNORECASE), 0.70, 40),
+        "Regulatory / Governance Warning": (re.compile(r"(?:resignation of auditor|cbi|ed search|seizure|enforcement|show cause notice|fraud)", re.IGNORECASE), -1.60, 22),
+    }
 
-RSS_FEEDS = [
-    "https://news.google.com/rss/search?q=NSE+BSE+corporate+announcements+OR+results+OR+order+win+OR+FDA+OR+merger&hl=en-IN&gl=IN&ceid=IN:en",
-    "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "https://www.moneycontrol.com/rss/MCtopnews.xml",
-    "https://www.business-standard.com/rss/markets-106.rss"
-]
+    RSS_FEEDS = [
+        "https://news.google.com/rss/search?q=NSE+BSE+corporate+announcements+OR+results+OR+order+win+OR+FDA+OR+merger&hl=en-IN&gl=IN&ceid=IN:en",
+        "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
+        "https://www.moneycontrol.com/rss/MCtopnews.xml",
+        "https://www.business-standard.com/rss/markets-106.rss"
+    ]
 
-# Ingest RSS
-matched_news = {}
-for url in RSS_FEEDS:
-    try:
-        f = feedparser.parse(url)
-        for entry in f.entries[:30]:
-            txt = f"{entry.get('title', '')} {entry.get('summary', '')}"
-            matched_syms = match_tickers_in_text(txt, NIFTY_UNIVERSE)
-            for sym in matched_syms:
-                badge, mult, p1 = "⚡ Technical Baseline", 1.0, 50
-                for c_name, (rgx, m, p) in CATALYST_RULES.items():
-                    if rgx.search(txt):
-                        badge, mult, p1 = c_name, m, p
-                        break
-                matched_news[sym] = {"catalyst": badge, "mult": mult, "p1": p1}
-    except Exception:
-        pass
-
-print("Fetching universe market data...")
-dl_list = [f"{s}.NS" for s in NIFTY_UNIVERSE]
-market_cache_file = os.path.join("data", "market_cache.parquet")
-raw_market = None
-try:
-    raw_market = yf.download(dl_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True)
-    if raw_market is not None and not raw_market.empty:
-        os.makedirs("data", exist_ok=True)
+    # Ingest RSS
+    matched_news = {}
+    for url in RSS_FEEDS:
         try:
-            raw_market.to_parquet(market_cache_file)
+            f = feedparser.parse(url)
+            for entry in f.entries[:30]:
+                txt = f"{entry.get('title', '')} {entry.get('summary', '')}"
+                matched_syms = match_tickers_in_text(txt, NIFTY_UNIVERSE)
+                for sym in matched_syms:
+                    badge, mult, p1 = "⚡ Technical Baseline", 1.0, 50
+                    for c_name, (rgx, m, p) in CATALYST_RULES.items():
+                        if rgx.search(txt):
+                            badge, mult, p1 = c_name, m, p
+                            break
+                    matched_news[sym] = {"catalyst": badge, "mult": mult, "p1": p1}
         except Exception:
             pass
-except Exception as e_dl:
-    print(f"yfinance download notice: {e_dl}")
 
-if (raw_market is None or raw_market.empty) and os.path.exists(market_cache_file):
+    print("Fetching universe market data...")
+    dl_list = [f"{s}.NS" for s in NIFTY_UNIVERSE]
+    market_cache_file = os.path.join("data", "market_cache.parquet")
+    raw_market = None
     try:
-        print("Loading market data from local parquet cache...")
-        raw_market = pd.read_parquet(market_cache_file)
-    except Exception as e_c:
-        print(f"Market cache load error: {e_c}")
+        raw_market = yf.download(dl_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True)
+        if raw_market is not None and not raw_market.empty:
+            os.makedirs("data", exist_ok=True)
+            try:
+                raw_market.to_parquet(market_cache_file)
+            except Exception:
+                pass
+    except Exception as e_dl:
+        print(f"yfinance download notice: {e_dl}")
 
-candidate_rows = []
-for sym in NIFTY_UNIVERSE:
-    ns_sym = f"{sym}.NS"
-    if ns_sym not in raw_market.columns.levels[0]:
-        continue
+    if (raw_market is None or raw_market.empty) and os.path.exists(market_cache_file):
+        try:
+            print("Loading market data from local parquet cache...")
+            raw_market = pd.read_parquet(market_cache_file)
+        except Exception as e_c:
+            print(f"Market cache load error: {e_c}")
 
-    df = raw_market[ns_sym].dropna()
-    if len(df) < 50:
-        continue
-
-    c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
-    cmp = float(c.iloc[-1])
-    d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
-    dist_200 = ((cmp - d200) / d200) * 100.0
-
-    p_5d = float(c.iloc[-6]) if len(c) >= 6 else float(c.iloc[0])
-    runup_5d = ((cmp - p_5d) / p_5d) * 100.0
-
-    v_latest = float(v.iloc[-1])
-    v_20d = float(v.rolling(20).mean().iloc[-1])
-    vol_surge = round(v_latest / v_20d, 2) if v_20d > 0 else 1.0
-
-    day_range = float(h.iloc[-1] - l.iloc[-1])
-    close_pos = round(((cmp - float(l.iloc[-1])) / day_range) * 100.0, 1) if day_range > 0 else 50.0
-
-    cat_data = matched_news.get(sym, {"catalyst": "⚡ Technical Baseline", "mult": 1.0, "p1": 50})
-
-    s_runup = np.clip(100.0 - (runup_5d * 10.0), -50.0, 50.0)
-    s_vol = (vol_surge * (close_pos - 50.0) * 0.4)
-    s_trend = 15.0 if dist_200 > 0 else -15.0
-    final_score = round(((s_runup * 0.35) + (s_vol * 0.45) + (s_trend * 0.20)) * cat_data["mult"], 1)
-
-    prob_1w = int(round(calibrate_empirical_probability(
-        score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
-        outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
-        market_regime="Sideways / Rangebound"
-    )))
-
-    if final_score >= 18.0 and prob_1w >= 65:
-        outlook = "BULLISH"
-    elif final_score <= -15.0 or (runup_5d >= 7.5 and close_pos <= 40.0) or prob_1w <= 40:
-        outlook = "BEARISH_FADE"
-    else:
-        outlook = "NEUTRAL"
-
-    if outlook != "NEUTRAL":
-        abs_target = 4.5 if outlook == "BULLISH" else 4.0
-        drift_velocity = 1.0 + (vol_surge * 0.25) if prob_1w >= 65 else 0.65
-        est_days = int(np.clip(round(abs_target / drift_velocity), 3, 15))
-
-        if est_days <= 5:
-            horizon_lbl = f"⚡ Fast Drift ({est_days} Sessions)"
-        elif est_days <= 10:
-            horizon_lbl = f"🎯 Tactical Swing ({est_days} Sessions)"
-        else:
-            horizon_lbl = f"⏳ Positional Unlock ({est_days} Sessions)"
-
-        candidate_rows.append({
-            "Ticker": sym, "CMP": cmp, "Score": final_score,
-            "Outlook": outlook, "Catalyst": cat_data["catalyst"],
-            "Horizon": horizon_lbl, "Target_Days": est_days
-        })
-
-c_df = pd.DataFrame(candidate_rows)
-new_predictions = []
-
-if not c_df.empty:
-    top_bullish = c_df[c_df["Outlook"] == "BULLISH"].sort_values(by="Score", ascending=False).head(3)
-    top_bearish = c_df[c_df["Outlook"] == "BEARISH_FADE"].sort_values(by="Score", ascending=True).head(3)
-    selected_today = pd.concat([top_bullish, top_bearish])
-
-    for _, row in selected_today.iterrows():
-        p_id = f"{today_str}_{row['Ticker']}"
-        if p_id in existing_preds:
+    candidate_rows = []
+    for sym in NIFTY_UNIVERSE:
+        ns_sym = f"{sym}.NS"
+        if ns_sym not in raw_market.columns.levels[0]:
             continue
 
-        is_bull = (row["Outlook"] == "BULLISH")
-        new_predictions.append({
-            "Prediction_ID": p_id,
-            "Date": timestamp_str,
-            "Ticker": row["Ticker"],
-            "Active_Catalyst": row["Catalyst"],
-            "CMP_At_Prediction": round(row["CMP"], 2),
-            "Predicted_Outlook": row["Outlook"],
-            "Recommended_Action": get_action_recommendation(row["Outlook"], row["Ticker"]),
-            "Holding_Horizon": row["Horizon"],
-            "Target_Days": row["Target_Days"],
-            "Trigger_Type": "SCHEDULED_CRON_AUTO",
-            "Confidence": "High",
-            "Target_Return_Pct": 4.5 if is_bull else -4.0,
-            "Stop_Loss_Pct": -2.5 if is_bull else 2.5,
-            "Days_Elapsed": 0,
-            "Current_CMP": round(row["CMP"], 2),
-            "Realized_Return_Pct": 0.0,
-            "Outcome_Status": "PENDING"
-        })
+        df = raw_market[ns_sym].dropna()
+        if len(df) < 50:
+            continue
 
-if new_predictions:
-    print(f"Logging {len(new_predictions)} automated daily predictions...")
-    new_df = pd.DataFrame(new_predictions)
-    ledger = pd.concat([ledger, new_df], ignore_index=True) if not ledger.empty else new_df
-    changed = True
+        c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
+        cmp = float(c.iloc[-1])
+        d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+        dist_200 = ((cmp - d200) / d200) * 100.0
+
+        p_5d = float(c.iloc[-6]) if len(c) >= 6 else float(c.iloc[0])
+        runup_5d = ((cmp - p_5d) / p_5d) * 100.0
+
+        v_latest = float(v.iloc[-1])
+        v_20d = float(v.rolling(20).mean().iloc[-1])
+        vol_surge = round(v_latest / v_20d, 2) if v_20d > 0 else 1.0
+
+        day_range = float(h.iloc[-1] - l.iloc[-1])
+        close_pos = round(((cmp - float(l.iloc[-1])) / day_range) * 100.0, 1) if day_range > 0 else 50.0
+
+        cat_data = matched_news.get(sym, {"catalyst": "⚡ Technical Baseline", "mult": 1.0, "p1": 50})
+
+        s_runup = np.clip(100.0 - (runup_5d * 10.0), -50.0, 50.0)
+        s_vol = (vol_surge * (close_pos - 50.0) * 0.4)
+        s_trend = 15.0 if dist_200 > 0 else -15.0
+        final_score = round(((s_runup * 0.35) + (s_vol * 0.45) + (s_trend * 0.20)) * cat_data["mult"], 1)
+
+        prob_1w = int(round(calibrate_empirical_probability(
+            score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
+            outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
+            market_regime="Sideways / Rangebound"
+        )))
+
+        if final_score >= 18.0 and prob_1w >= 65:
+            outlook = "BULLISH"
+        elif final_score <= -15.0 or (runup_5d >= 7.5 and close_pos <= 40.0) or prob_1w <= 40:
+            outlook = "BEARISH_FADE"
+        else:
+            outlook = "NEUTRAL"
+
+        if outlook != "NEUTRAL":
+            abs_target = 4.5 if outlook == "BULLISH" else 4.0
+            drift_velocity = 1.0 + (vol_surge * 0.25) if prob_1w >= 65 else 0.65
+            est_days = int(np.clip(round(abs_target / drift_velocity), 3, 15))
+
+            if est_days <= 5:
+                horizon_lbl = f"⚡ Fast Drift ({est_days} Sessions)"
+            elif est_days <= 10:
+                horizon_lbl = f"🎯 Tactical Swing ({est_days} Sessions)"
+            else:
+                horizon_lbl = f"⏳ Positional Unlock ({est_days} Sessions)"
+
+            candidate_rows.append({
+                "Ticker": sym, "CMP": cmp, "Score": final_score,
+                "Outlook": outlook, "Catalyst": cat_data["catalyst"],
+                "Horizon": horizon_lbl, "Target_Days": est_days
+            })
+
+    c_df = pd.DataFrame(candidate_rows)
+    new_predictions = []
+
+    if not c_df.empty:
+        top_bullish = c_df[c_df["Outlook"] == "BULLISH"].sort_values(by="Score", ascending=False).head(3)
+        top_bearish = c_df[c_df["Outlook"] == "BEARISH_FADE"].sort_values(by="Score", ascending=True).head(3)
+        selected_today = pd.concat([top_bullish, top_bearish])
+
+        for _, row in selected_today.iterrows():
+            p_id = f"{today_str}_{row['Ticker']}"
+            if p_id in existing_preds:
+                continue
+
+            is_bull = (row["Outlook"] == "BULLISH")
+            new_predictions.append({
+                "Prediction_ID": p_id,
+                "Date": timestamp_str,
+                "Ticker": row["Ticker"],
+                "Active_Catalyst": row["Catalyst"],
+                "CMP_At_Prediction": round(row["CMP"], 2),
+                "Predicted_Outlook": row["Outlook"],
+                "Recommended_Action": get_action_recommendation(row["Outlook"], row["Ticker"]),
+                "Holding_Horizon": row["Horizon"],
+                "Target_Days": row["Target_Days"],
+                "Trigger_Type": "SCHEDULED_CRON_AUTO",
+                "Confidence": "High",
+                "Target_Return_Pct": 4.5 if is_bull else -4.0,
+                "Stop_Loss_Pct": -2.5 if is_bull else 2.5,
+                "Days_Elapsed": 0,
+                "Current_CMP": round(row["CMP"], 2),
+                "Realized_Return_Pct": 0.0,
+                "Outcome_Status": "PENDING"
+            })
+
+    if new_predictions:
+        print(f"Logging {len(new_predictions)} automated daily predictions...")
+        new_df = pd.DataFrame(new_predictions)
+        ledger = pd.concat([ledger, new_df], ignore_index=True) if not ledger.empty else new_df
+        changed = True
 
 if changed:
     ledger.to_csv(file_path, index=False)
@@ -365,15 +369,24 @@ try:
     engine = DualLogicBacktestEngine.load_or_initialize()
     candidates_df = compute_live_deep_value_candidates(base_budget=50000.0)
 
-    # Automatically execute 3:00 PM paper trades for any new qualified stocks, ignoring duplicates
-    print("Executing automated 3:00 PM Dual-Logic paper trade allocation (₹50K budget, ignoring duplicates)...")
-    auto_trade_res = auto_execute_3pm_dual_logic_trades(
-        candidates_df=candidates_df,
-        current_user="GitHub_Actions_3PM_Daemon",
-        base_budget=50000.0,
-        force_run=True
-    )
-    print(f"3:00 PM Auto-Trade Result: {auto_trade_res.get('message')}")
+    # Strictly halt paper trade execution on weekends
+    if is_weekend:
+        print(f"[WEEKEND GUARD] Weekend detected ({now_ist.strftime('%A')}). Automated 3:00 PM Dual-Logic paper trade allocation is strictly halted.")
+        auto_trade_res = {
+            "status": "SKIPPED_WEEKEND",
+            "message": f"Weekend Guard Active: Markets closed today ({now_ist.strftime('%A')}). Automated paper trades strictly run Monday–Friday.",
+            "timestamp": now_ist.strftime("%Y-%m-%d %H:%M:%S IST")
+        }
+    else:
+        # Automatically execute 3:00 PM paper trades for any new qualified stocks, ignoring duplicates
+        print("Executing automated 3:00 PM Dual-Logic paper trade allocation (₹50K budget, ignoring duplicates)...")
+        auto_trade_res = auto_execute_3pm_dual_logic_trades(
+            candidates_df=candidates_df,
+            current_user="GitHub_Actions_3PM_Daemon",
+            base_budget=50000.0,
+            force_run=True
+        )
+        print(f"3:00 PM Auto-Trade Result: {auto_trade_res.get('message')}")
 
     if not candidates_df.empty:
         findings_path = os.path.join("data", "dual_logic_findings.json")
