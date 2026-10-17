@@ -213,15 +213,75 @@ def get_action_recommendation(outlook: str, ticker: str) -> str:
         return "🟡 NEUTRAL / MONITOR"
 
 # =====================================================================
-# Empirical Probability Calibration (Platt / Logistic Scaling)
+# Empirical Probability Calibration (Platt / Logistic Scaling + Past Ledger Memory)
 # Fit on real historical trade ledger (catalyst_prediction_ledger.csv)
 # =====================================================================
+_EMPIRICAL_LEDGER_MEMORY_CACHE = None
+
+def _load_empirical_ledger_memory() -> dict:
+    """
+    Loads closed trade outcomes per (Ticker, Direction) from catalyst_prediction_ledger.csv
+    to provide factual past-performance feedback (Empirical Bayes shrinkage) to live predictions.
+    """
+    global _EMPIRICAL_LEDGER_MEMORY_CACHE
+    if _EMPIRICAL_LEDGER_MEMORY_CACHE is not None:
+        return _EMPIRICAL_LEDGER_MEMORY_CACHE
+
+    memory = {}
+    try:
+        import os
+        ledger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalyst_prediction_ledger.csv")
+        if os.path.exists(ledger_path):
+            df = pd.read_csv(ledger_path, on_bad_lines="skip")
+            closed = df[df["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
+            for (tkr, out), grp in closed.groupby(["Ticker", "Predicted_Outlook"]):
+                clean_t = str(tkr).replace(".NS", "").strip().upper()
+                dir_key = "BULLISH" if "BULLISH" in str(out).upper() else "BEARISH_FADE"
+                n_total = len(grp)
+                n_win = int((grp["Outcome_Status"] == "SUCCESS").sum())
+                memory[(clean_t, dir_key)] = (n_win, n_total)
+    except Exception:
+        pass
+    _EMPIRICAL_LEDGER_MEMORY_CACHE = memory
+    return memory
+
+
+def get_empirical_ticker_memory(ticker: str, outlook: str = "BULLISH") -> float:
+    """
+    Returns an Empirical Bayes logit adjustment based on factual historical hit-rate
+    for (ticker, outlook) in catalyst_prediction_ledger.csv.
+    - Penalizes secular momentum / repeat-failing fade traps (e.g., TRENT 0/7, BHARTIARTL 0/4,
+      ICICIGI 0/4, TORNTPOWER 0/4) by up to -0.65 logit.
+    - Rewards proven mean-reverting setups (e.g., MAXHEALTH 9/9, AMBUJACEM 4/4, HINDUNILVR 3/3)
+      by up to +0.35 logit.
+    """
+    if not ticker:
+        return 0.0
+    clean_t = str(ticker).replace(".NS", "").strip().upper()
+    dir_key = "BULLISH" if "BULLISH" in str(outlook).upper() else "BEARISH_FADE"
+    mem = _load_empirical_ledger_memory()
+    if (clean_t, dir_key) not in mem:
+        return 0.0
+    n_win, n_total = mem[(clean_t, dir_key)]
+    if n_total < 2:
+        return 0.0
+    # Empirical Bayes posterior win rate with prior 0.50 and strength m=2
+    post_wr = (n_win + 2.0 * 0.50) / (n_total + 2.0)
+    raw_wr = n_win / n_total
+    if raw_wr <= 0.25 and n_total >= 2:
+        return -0.65 if n_total >= 3 else -0.45
+    elif raw_wr >= 0.75 and n_total >= 2:
+        return 0.35 if n_total >= 3 else 0.25
+    return float(np.clip((post_wr - 0.50) * 1.2, -0.50, 0.35))
+
+
 def calibrate_empirical_probability(
     score: float,
     vol_surge: float = 1.0,
     runup_5d: float = 0.0,
     outlook: str = "BULLISH",
-    market_regime: str = "Sideways"
+    market_regime: str = "Sideways",
+    ticker: str = None
 ) -> float:
     """
     Computes an empirical, Platt-calibrated probability of trade success.
@@ -230,6 +290,7 @@ def calibrate_empirical_probability(
     - Directional bias (bearish fade vs bullish breakout in mean-reverting regime)
     - Volume surge enhancement (+0.30 logit per surge above 1.8x)
     - Pre-runup exhaustion penalty (-0.60 logit for extended runup)
+    - Empirical Bayes ticker-level historical feedback loop (get_empirical_ticker_memory)
     Returns a probability bounded honestly between 18.0% and 68.0%.
     """
     is_bull = "BULLISH" in str(outlook).upper()
@@ -264,6 +325,10 @@ def calibrate_empirical_probability(
         logit += 0.25 if is_bull else -0.25
     elif "bear" in regime_str:
         logit += 0.25 if not is_bull else -0.35
+
+    # Historical ticker-specific Empirical Bayes feedback adjustment
+    if ticker:
+        logit += get_empirical_ticker_memory(ticker, outlook)
 
     # Platt sigmoid transformation
     prob = 1.0 / (1.0 + np.exp(-logit))

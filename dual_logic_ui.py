@@ -213,6 +213,19 @@ def fetch_complete_universe_technicals(tickers_tuple):
     return results
 
 
+def _safe_read_csv(filepath: str) -> pd.DataFrame:
+    """Safely reads a CSV file without crashing on malformed or schema-drifted rows."""
+    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(filepath, on_bad_lines="skip")
+    except Exception:
+        try:
+            return pd.read_csv(filepath, engine="python", on_bad_lines="skip")
+        except Exception:
+            return pd.DataFrame()
+
+
 def get_active_long_term_trades(live_market_lookup=None):
     """
     Scans data/paper_trades.csv and catalyst_prediction_ledger.csv for active positions.
@@ -225,7 +238,7 @@ def get_active_long_term_trades(live_market_lookup=None):
     # 1. Local paper trades CSV
     if os.path.exists(LOCAL_TRADES_CSV) and os.path.getsize(LOCAL_TRADES_CSV) > 0:
         try:
-            df_local = pd.read_csv(LOCAL_TRADES_CSV)
+            df_local = _safe_read_csv(LOCAL_TRADES_CSV)
             if not df_local.empty and "Status" in df_local.columns and "Ticker" in df_local.columns:
                 if "Category" in df_local.columns:
                     active_local = df_local[(df_local["Status"] == "ACTIVE") & (df_local["Category"].astype(str).str.contains("Long Term|Physical Moat|Category 6|Dual-Logic", case=False, na=False))]
@@ -287,7 +300,7 @@ def get_active_long_term_trades(live_market_lookup=None):
     # 2. Catalyst prediction ledger
     if os.path.exists(PULSE_LEDGER_CSV) and os.path.getsize(PULSE_LEDGER_CSV) > 0:
         try:
-            df_pulse = pd.read_csv(PULSE_LEDGER_CSV)
+            df_pulse = _safe_read_csv(PULSE_LEDGER_CSV)
             if not df_pulse.empty and "Outcome_Status" in df_pulse.columns and "Ticker" in df_pulse.columns:
                 active_pulse = df_pulse[df_pulse["Outcome_Status"] == "OPEN"]
                 for _, row in active_pulse.iterrows():
@@ -451,7 +464,18 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
         os.makedirs(DATA_DIR, exist_ok=True)
         t_df = pd.DataFrame([trade_record])
         if os.path.exists(LOCAL_TRADES_CSV) and os.path.getsize(LOCAL_TRADES_CSV) > 0:
-            t_df.to_csv(LOCAL_TRADES_CSV, mode="a", header=False, index=False)
+            existing_local = _safe_read_csv(LOCAL_TRADES_CSV)
+            if not existing_local.empty:
+                for col in t_df.columns:
+                    if col not in existing_local.columns:
+                        existing_local[col] = np.nan
+                for col in existing_local.columns:
+                    if col not in t_df.columns:
+                        t_df[col] = np.nan
+                combined_local = pd.concat([existing_local, t_df[existing_local.columns]], ignore_index=True)
+                combined_local.to_csv(LOCAL_TRADES_CSV, index=False)
+            else:
+                t_df.to_csv(LOCAL_TRADES_CSV, index=False)
         else:
             t_df.to_csv(LOCAL_TRADES_CSV, index=False)
     except Exception as e:
@@ -482,7 +506,16 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
                 "Catalyst_Score": round(score * 100, 1),
                 "Remarks": f"Dynamic ATR Bracket | SL ₹{sl:,.2f} (-{risk_pct:.1f}%) | Tgt ₹{tgt:,.2f} (+{tgt_pct:.1f}%) | D/E {de_val:.2f} | IC {ic_val:.1f}x | Z'' {altman_z:.2f} | DD {merton_dd:.2f}"
             }
-            pd.DataFrame([ledger_row]).to_csv(PULSE_LEDGER_CSV, mode="a", header=False, index=False)
+            existing_pulse = _safe_read_csv(PULSE_LEDGER_CSV)
+            l_df = pd.DataFrame([ledger_row])
+            if not existing_pulse.empty:
+                for col in existing_pulse.columns:
+                    if col not in l_df.columns:
+                        l_df[col] = np.nan
+                combined_pulse = pd.concat([existing_pulse, l_df[existing_pulse.columns]], ignore_index=True)
+                combined_pulse.to_csv(PULSE_LEDGER_CSV, index=False)
+            else:
+                l_df.to_csv(PULSE_LEDGER_CSV, index=False)
     except Exception:
         pass
 
@@ -495,7 +528,7 @@ def square_off_long_term_paper_trade(trade_id, exit_cmp=None, exit_reason="Manua
     """
     try:
         if os.path.exists(LOCAL_TRADES_CSV) and os.path.getsize(LOCAL_TRADES_CSV) > 0:
-            df = pd.read_csv(LOCAL_TRADES_CSV)
+            df = _safe_read_csv(LOCAL_TRADES_CSV)
             if "Trade_ID" in df.columns:
                 idx_match = df[df["Trade_ID"] == trade_id].index
                 if not idx_match.empty:
@@ -518,7 +551,7 @@ def square_off_long_term_paper_trade(trade_id, exit_cmp=None, exit_reason="Manua
 
     try:
         if os.path.exists(PULSE_LEDGER_CSV) and os.path.getsize(PULSE_LEDGER_CSV) > 0:
-            df_pulse = pd.read_csv(PULSE_LEDGER_CSV)
+            df_pulse = _safe_read_csv(PULSE_LEDGER_CSV)
             if "Prediction_ID" in df_pulse.columns:
                 idx_p = df_pulse[df_pulse["Prediction_ID"] == trade_id].index
                 if not idx_p.empty:
@@ -1704,9 +1737,10 @@ def render_dual_logic_studio():
         st.caption("Persistent historical audit of all backtesting epochs, Bayesian sweeps, and parameter calibrations.")
 
         if os.path.exists(RUNS_CSV_PATH):
-            runs_df = pd.read_csv(RUNS_CSV_PATH)
-            st.markdown(f"**Optimization Run History ({len(runs_df)} Trials Recorded):**")
-            st.dataframe(runs_df.tail(20), use_container_width=True, hide_index=True)
+            runs_df = _safe_read_csv(RUNS_CSV_PATH)
+            if not runs_df.empty:
+                st.markdown(f"**Optimization Run History ({len(runs_df)} Trials Recorded):**")
+                st.dataframe(runs_df.tail(20), use_container_width=True, hide_index=True)
 
         if os.path.exists(AGENT_LOG_PATH):
             with st.expander("📄 View Live Autonomous Agent Log Stream", expanded=False):
@@ -1720,12 +1754,27 @@ def render_dual_logic_studio():
 
 def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget=50000.0):
     """
-    Computes real-time Dual-Logic v4.2 Bear-Market scores, Technical/Fundamental scores,
-    RSI, 52W/Weekly/Day Lows, Institutional 12M FII/DII Trends, and actionable recommendations.
+    Computes real-time Dual-Logic v5.0 Bear-Market scores integrating 20-Year Empirical Win Rate,
+    Solvency-Adjusted Balance Health, Technical/Fundamental scores, RSI, 52W/Weekly/Day Lows,
+    Institutional 12M FII/DII Trends, and actionable recommendations.
     Enforces ₹50,000 allocation per asset with zero duplicate buying.
     """
     engine = DualLogicBacktestEngine.load_or_initialize()
     w = engine.weights
+
+    # Build 20-year empirical compounder lookup from verified engine.data (2006-2026)
+    hist_stats_map = {}
+    if engine.data is not None and not engine.data.empty:
+        for t_sym, grp in engine.data.groupby("Ticker"):
+            t_key = str(t_sym).replace(".NS", "").strip().upper()
+            wr_20y = float(grp["Actual_Success"].mean()) if "Actual_Success" in grp.columns else 0.55
+            med_cagr = float(grp["Actual_3Y_CAGR"].median()) if "Actual_3Y_CAGR" in grp.columns else 0.11
+            ocf_cons = float(grp["OCF_Consistency"].mean()) if "OCF_Consistency" in grp.columns else 0.78
+            hist_stats_map[t_key] = {
+                "wr_20y": wr_20y,
+                "med_cagr": med_cagr,
+                "ocf_cons": ocf_cons,
+            }
 
     # Build fast lookup map from live market dataframes
     live_market_lookup = {}
@@ -1786,6 +1835,11 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         capex = float(p.get("capex_scale", 0.8))
         ai_vuln = float(p.get("ai_vulnerability", 0.1))
         asset_moat = round((capex * 0.6) + ((1.0 - ai_vuln) * 0.4), 2)
+
+        t_emp = hist_stats_map.get(ticker_clean, {"wr_20y": 0.55, "med_cagr": 0.11, "ocf_cons": 0.78})
+        hist_20y_wr = float(t_emp["wr_20y"])
+        hist_med_cagr = float(t_emp["med_cagr"])
+        ocf_val = float(t_emp["ocf_cons"])
 
         # Institutional Shareholding Patterns (12-Month Changes)
         fii_pct = float(p.get("fii_pct", 18.5))
@@ -1866,32 +1920,36 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             dist_day_low = round(((cmp_val - day_low) / day_low) * 100.0, 1)
             drawdown = 0.14
 
-        # Strict Dual-Logic v4.2 Production Formula
-        w_de = w.get("debt_eq", 0.44)
-        w_dd = w.get("drawdown", 0.15)
-        w_am = w.get("asset_moat", 0.23)
-        w_ic = w.get("interest_cov", 0.13)
-        w_grid = w.get("macro_grid", 0.11)
+        # Strict Dual-Logic v5.0 Production Formula (Solvency-Adjusted Balance Health + 20Y Empirical Track Record)
+        w_de = w.get("debt_eq", 0.26)
+        w_dd = w.get("drawdown", 0.20)
+        w_am = w.get("asset_moat", 0.26)
+        w_ic = w.get("interest_cov", 0.12)
+        w_grid = w.get("macro_grid", 0.08)
         w_ai = w.get("ai_resilience", 0.08)
 
-        debt_term = (1.0 / (1.0 + de)) * w_de
+        de_adj = 1.0 / (1.0 + max(0.0, de - 0.35))
+        balance_health = 0.55 * ocf_val + 0.45 * de_adj
+        debt_term = balance_health * w_de
         dd_term = min(1.0, drawdown * 2.2) * w_dd
         moat_term = asset_moat * w_am
-        ic_term = min(1.0, ic / 10.0) * w_ic
+        ic_term = min(1.0, max(0.0, (ic - 1.0) / 14.0)) * w_ic
         grid_term = 0.88 * w_grid
         ai_term = (1.0 - ai_vuln) * w_ai
 
         raw_score = debt_term + dd_term + moat_term + ic_term + grid_term + ai_term
         total_w = sum([w_de, w_dd, w_am, w_ic, w_grid, w_ai])
-        norm_score = min(0.99, max(0.20, raw_score / (total_w if total_w > 0 else 1.0)))
+        base_score = raw_score / (total_w if total_w > 0 else 1.0)
+        norm_score = min(0.99, max(0.20, 0.70 * base_score + 0.30 * hist_20y_wr))
 
         # Multi-Factor Component Scores (0 - 100 Scale)
-        # 1. Fundamental Score (0-100)
-        fund_de_pts = (1.0 / (1.0 + max(0.0, de))) * 35.0
-        fund_ic_pts = min(25.0, (ic / 10.0) * 25.0)
-        fund_moat_pts = asset_moat * 25.0
-        fund_ai_pts = (1.0 - ai_vuln) * 15.0
-        fund_score = round(float(np.clip(fund_de_pts + fund_ic_pts + fund_moat_pts + fund_ai_pts, 15.0, 99.0)), 1)
+        # 1. Fundamental Score (0-100) incorporating OCF/Solvency and 20Y Empirical Compounding
+        fund_de_pts = balance_health * 30.0
+        fund_ic_pts = min(20.0, (ic / 10.0) * 20.0)
+        fund_moat_pts = asset_moat * 22.0
+        fund_ai_pts = (1.0 - ai_vuln) * 13.0
+        fund_emp_pts = min(15.0, hist_20y_wr * 18.0)
+        fund_score = round(float(np.clip(fund_de_pts + fund_ic_pts + fund_moat_pts + fund_ai_pts + fund_emp_pts, 15.0, 99.0)), 1)
 
         # 2. Technical Score (0-100)
         # RSI 30-45 accumulation zone = 35 pts
@@ -1948,11 +2006,12 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         target_pct = bracket["target_pct"]
         rr_ratio = bracket["rr_ratio"]
 
-        # Fact-based Solvency & Kinematic Gates
+        # Fact-based Solvency, Kinematic & 20-Year Empirical Compounding Gates
         de_pass = bool(de <= 1.50)
         ic_pass = bool(ic >= 2.0)
         solvency_pass = bool(altman_z >= 1.80 and ic_pass and merton_dd >= 1.80)
         kinematic_pass = bool(drawdown <= 0.60 and rsi_val >= 22.0)
+        empirical_compounder_pass = bool(hist_20y_wr >= 0.50 and hist_med_cagr >= 0.10)
 
         # AI Disruption Vulnerability Cohort
         if ai_vuln <= 0.08:
@@ -1968,15 +2027,18 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             cohort_name = "Cohort 3: Software Services & Labor Disruption"
             cohort_badge = "⚠️ AI Disruption Exposure"
 
-        # Action Recommendation & Signal Classification with Solvency Veto
-        if norm_score >= 0.75 and solvency_pass and kinematic_pass and ai_vuln <= 0.25:
+        # Action Recommendation & Signal Classification with Solvency & Empirical Value-Trap Veto
+        if norm_score >= 0.63 and solvency_pass and kinematic_pass and ai_vuln <= 0.25 and empirical_compounder_pass:
             rec_signal = "🟢 HIGH-CONVICTION BUY"
-            status_desc = "Deep-Value Moat Accumulate (Solvency & Volatility Passed)"
+            status_desc = f"Deep-Value Moat Accumulate (20Y WR: {hist_20y_wr*100:.1f}%, Med 3Y CAGR: {hist_med_cagr*100:.1f}%)"
             badge_bg = "#dcfce7"
             badge_col = "#166534"
-        elif norm_score >= 0.65 and solvency_pass:
+        elif norm_score >= 0.61 and solvency_pass and kinematic_pass:
             rec_signal = "🟡 WATCHLIST ACCUMULATE"
-            status_desc = "Dip Accumulation Zone (Solvency Verified)"
+            if not empirical_compounder_pass:
+                status_desc = f"⚠️ Value Trap Veto: 20Y WR {hist_20y_wr*100:.1f}% (<50%) | Med 3Y CAGR {hist_med_cagr*100:.1f}%"
+            else:
+                status_desc = f"Dip Accumulation Zone (20Y WR: {hist_20y_wr*100:.1f}%, Solvency Verified)"
             badge_bg = "#fef9c3"
             badge_col = "#854d0e"
         else:
@@ -1990,9 +2052,14 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
                 status_desc = "🚨 Kinematic Deceleration Veto"
                 badge_bg = "#fee2e2"
                 badge_col = "#991b1b"
+            elif ai_vuln > 0.35:
+                rec_signal = "⚪ CAPITAL PRESERVATION"
+                status_desc = f"⚠️ AI Disruption Veto (Vulnerability: {ai_vuln:.2f})"
+                badge_bg = "#fee2e2"
+                badge_col = "#991b1b"
             else:
                 rec_signal = "⚪ CAPITAL PRESERVATION"
-                status_desc = "Neutral / Wait"
+                status_desc = f"Neutral / Wait (20Y WR: {hist_20y_wr*100:.1f}%)"
                 badge_bg = "#f1f5f9"
                 badge_col = "#475569"
 
@@ -2009,6 +2076,8 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             "CMP (₹)": cmp_val,
             "Composite_Score": round(norm_score, 3),
             "Dual_Logic_Score": round(norm_score, 3),
+            "Hist_20Y_Win_Rate_Pct": round(hist_20y_wr * 100.0, 1),
+            "Hist_Median_3Y_CAGR_Pct": round(hist_med_cagr * 100.0, 1),
             "Technical_Score": tech_score,
             "Fundamental_Score": fund_score,
             "Action_Signal": rec_signal,
@@ -2445,8 +2514,9 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             filtered_table = filtered_table[filtered_table["Action_Signal"].str.contains("HIGH-CONVICTION|WATCHLIST", na=False)]
 
         disp_cols = [
-            "Ticker", "Name", "Sector", "CMP (₹)", "Composite_Score", "Technical_Score", "Fundamental_Score",
-            "Merton_DD", "Altman_Z_Double_Prime", "ATR_14", "RSI (14D)", "52W_Low (₹)", "Dist_52W_Low_Pct", "Weekly_Low (₹)", "Dist_Weekly_Low_Pct",
+            "Ticker", "Name", "Sector", "CMP (₹)", "Composite_Score", "Hist_20Y_Win_Rate_Pct", "Hist_Median_3Y_CAGR_Pct",
+            "Technical_Score", "Fundamental_Score", "Merton_DD", "Altman_Z_Double_Prime", "ATR_14", "RSI (14D)",
+            "52W_Low (₹)", "Dist_52W_Low_Pct", "Weekly_Low (₹)", "Dist_Weekly_Low_Pct",
             "Day_Low (₹)", "Dist_Day_Low_Pct", "FII_Pct", "FII_12M_Chg", "DII_Pct", "DII_12M_Chg", "Institutional_Trend",
             "Debt_Equity", "Interest_Coverage", "Asset_Moat_Score", "Portfolio_Status", "Action_Signal",
             "Suggested_Qty", "Tranche_Value_Rs", "Stop_Loss (₹)", "Target (₹)", "RR_Ratio", "Target_CAGR"
@@ -2455,6 +2525,8 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
 
         rename_cols = {
             "Composite_Score": "Composite Score 🟢 HTB",
+            "Hist_20Y_Win_Rate_Pct": "20Y Win Rate % 🟢 HTB",
+            "Hist_Median_3Y_CAGR_Pct": "20Y Med CAGR % 🟢 HTB",
             "Technical_Score": "Tech Score 🟢 HTB",
             "Fundamental_Score": "Fund Score 🟢 HTB",
             "Merton_DD": "Merton DD 🟢 HTB",
@@ -2489,6 +2561,8 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             disp_df.style.format({
                 "CMP (₹)": "₹{:.2f}",
                 "Composite Score 🟢 HTB": "{:.1%}",
+                "20Y Win Rate % 🟢 HTB": "{:.1f}%",
+                "20Y Med CAGR % 🟢 HTB": "{:.1f}%",
                 "Tech Score 🟢 HTB": "{:.1f}%",
                 "Fund Score 🟢 HTB": "{:.1f}%",
                 "Merton DD 🟢 HTB": "{:.2f}",

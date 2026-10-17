@@ -282,12 +282,13 @@ else:
         prob_1w = int(round(calibrate_empirical_probability(
             score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
             outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
-            market_regime="Sideways / Rangebound"
+            market_regime="Sideways / Rangebound",
+            ticker=sym
         )))
 
-        if final_score >= 18.0 and prob_1w >= 65:
+        if final_score >= 18.0 and prob_1w >= 52:
             outlook = "BULLISH"
-        elif final_score <= -15.0 or (runup_5d >= 7.5 and close_pos <= 40.0) or prob_1w <= 40:
+        elif (final_score <= -15.0 or (runup_5d >= 7.5 and close_pos <= 40.0)) and prob_1w >= 44:
             outlook = "BEARISH_FADE"
         else:
             outlook = "NEUTRAL"
@@ -337,7 +338,7 @@ else:
                 "Trigger_Type": "SCHEDULED_CRON_AUTO",
                 "Confidence": "High",
                 "Target_Return_Pct": 4.5 if is_bull else -4.0,
-                "Stop_Loss_Pct": -2.5 if is_bull else 2.5,
+                "Stop_Loss_Pct": -3.5 if is_bull else 2.5,
                 "Days_Elapsed": 0,
                 "Current_CMP": round(row["CMP"], 2),
                 "Realized_Return_Pct": 0.0,

@@ -581,7 +581,7 @@ def log_daily_predictions_to_github(candidates_df, trigger_type="MANUAL_WEB_UI",
             "Confidence": f"{prob_1w_val}%",
             "Catalyst_Score": cat_score_val,
             "Target_Return_Pct": 4.5 if is_bullish else -4.0,
-            "Stop_Loss_Pct": -2.5 if is_bullish else 2.5,
+            "Stop_Loss_Pct": -3.5 if is_bullish else 2.5,
             "Days_Elapsed": 0,
             "Current_CMP": row["CMP (₹)"],
             "Realized_Return_Pct": 0.0,
@@ -757,13 +757,14 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
             vol_surge=vol_surge_ratio,
             runup_5d=runup_5d,
             outlook=temp_outlook,
-            market_regime="Sideways"
+            market_regime="Sideways",
+            ticker=clean_sym
         )))
         prob_2w = int(round(np.clip(prob_1w * 1.05 if prob_1w > 50 else prob_1w * 0.95, 18, 68)))
 
-        if final_catalyst_score >= 18.0 and prob_1w >= 54:
+        if final_catalyst_score >= 18.0 and prob_1w >= 52:
             outlook = "🟢 Bullish Drift (1-2W)"
-        elif final_catalyst_score <= -15.0 or (runup_5d >= 7.5 and close_pos_pct <= 40.0) or prob_1w <= 42:
+        elif (final_catalyst_score <= -15.0 or (runup_5d >= 7.5 and close_pos_pct <= 40.0)) and prob_1w >= 44:
             outlook = "🔴 Distribution / Fade (1-2W)"
         else:
             outlook = "🟡 Neutral Consolidation"
