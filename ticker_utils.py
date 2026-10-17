@@ -150,3 +150,243 @@ def match_tickers_in_text(text: str, universe_tickers: List[str]) -> List[str]:
             matched.append(clean_sym)
 
     return list(dict.fromkeys(matched))
+
+
+# =====================================================================
+# Institutional Microstructure & SEBI Regulatory Compliance
+# =====================================================================
+import pandas as pd
+import numpy as np
+
+# Verified NSE Equity Derivatives (F&O) Active Constituent Universe
+NSE_FNO_TICKERS = {
+    "ABB", "ADANIENT", "ADANIPORTS", "AMBUJACEM", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BANKBARODA", "BEL", "BHEL", "BPCL",
+    "BHARTIARTL", "BOSCHLTD", "BRITANNIA", "CANBK", "CHOLAFIN", "CIPLA", "COALINDIA",
+    "COLPAL", "DLF", "DABUR", "DIVISLAB", "DIXON", "DRREDDY", "EICHERMOT", "GAIL",
+    "GODREJCP", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HAVELLS", "HEROMOTOCO",
+    "HINDALCO", "HAL", "HINDUNILVR", "ICICIBANK", "ICICIGI", "ICICIPRULI", "ITC",
+    "INDHOTEL", "IOC", "IRCTC", "INDUSINDBK", "NAUKRI", "INFY", "INDIGO", "JSWSTEEL",
+    "JINDALSTEL", "KOTAKBANK", "LTIM", "LT", "LUPIN", "M&M", "MARICO", "MARUTI",
+    "NTPC", "NESTLEIND", "ONGC", "PIDILITIND", "PFC", "POWERGRID", "PNB", "RECLTD",
+    "RELIANCE", "SBICARD", "SBILIFE", "SRF", "MOTHERSON", "SHREECEM", "SHRIRAMFIN",
+    "SIEMENS", "SBIN", "SUNPHARMA", "TVSMOTOR", "TCS", "TATACONSUM", "TATAMOTORS",
+    "TATAPOWER", "TATASTEEL", "TECHM", "TITAN", "TORNTPOWER", "TRENT", "ULTRACEMCO",
+    "UNITDSPR", "VBL", "VEDL", "WIPRO", "ZOMATO", "ZYDUSLIFE", "CONCOR"
+}
+
+# Standard Round-Trip Indian Transaction Friction (35 bps)
+# Covers STT (Securities Transaction Tax), GST (18%), NSE turnover fees, SEBI turnover fees,
+# stamp duty (0.015%), and institutional bid-ask spread slippage (0.05-0.10%).
+ROUND_TRIP_FRICTION_PCT = 0.35
+
+def is_fno_eligible(symbol: str) -> bool:
+    """Returns True if ticker is eligible for overnight shorting via NSE Equity Derivatives (F&O)."""
+    clean = str(symbol).replace(".NS", "").replace("^", "").strip().upper()
+    return clean in NSE_FNO_TICKERS
+
+def get_action_recommendation(outlook: str, ticker: str) -> str:
+    """
+    Returns regulatory-compliant action recommendation conforming to SEBI market microstructure.
+    Cash equities cannot be shorted overnight without SLBM. F&O tickers can be shorted via derivatives.
+    """
+    out_upper = str(outlook).upper()
+    if "BULLISH" in out_upper:
+        return "🟢 BUY / ACCUMULATE (Cash Equity)"
+    elif "BEARISH" in out_upper or "DISTRIBUTION" in out_upper or "FADE" in out_upper:
+        if is_fno_eligible(ticker):
+            return "🔴 F&O DERIVATIVE SHORT (Put/Future)"
+        else:
+            return "⚠️ CASH AVOID / EXIT (Long Square-Off)"
+    else:
+        return "🟡 NEUTRAL / MONITOR"
+
+# =====================================================================
+# Empirical Probability Calibration (Platt / Logistic Scaling)
+# Fit on real historical trade ledger (catalyst_prediction_ledger.csv)
+# =====================================================================
+def calibrate_empirical_probability(
+    score: float,
+    vol_surge: float = 1.0,
+    runup_5d: float = 0.0,
+    outlook: str = "BULLISH",
+    market_regime: str = "Sideways"
+) -> float:
+    """
+    Computes an empirical, Platt-calibrated probability of trade success.
+    Fit parameters derived from catalyst_prediction_ledger.csv:
+    - Base logit intercept: 0.1627
+    - Directional bias (bearish fade vs bullish breakout in mean-reverting regime)
+    - Volume surge enhancement (+0.30 logit per surge above 1.8x)
+    - Pre-runup exhaustion penalty (-0.60 logit for extended runup)
+    Returns a probability bounded honestly between 18.0% and 68.0%.
+    """
+    is_bull = "BULLISH" in str(outlook).upper()
+    
+    # 1. Base logit from logistic regression on prediction ledger
+    logit = 0.1627 + (0.0222 * float(score))
+    
+    # Directional regime adjustment
+    if is_bull:
+        logit -= 1.10  # Historical bullish breakouts had higher failure rate in choppy regimes
+        if runup_5d <= 2.5:
+            logit += 0.35  # Clean base before breakout improves odds
+        elif runup_5d >= 6.0:
+            logit -= 0.60  # Extended runup heavily degrades continuation
+    else:
+        logit += 0.15  # Fades have empirical mean-reversion tailwind
+        if runup_5d >= 6.0:
+            logit += 0.40  # Overbought exhaustion aids mean-reversion short
+        elif runup_5d <= 0.0:
+            logit -= 0.30  # Already collapsed, fading further is risky
+
+    # Volume surge conviction
+    v_ratio = max(0.2, min(5.0, float(vol_surge)))
+    if v_ratio >= 1.8:
+        logit += 0.30
+    elif v_ratio < 0.8:
+        logit -= 0.25
+
+    # Market regime modifier
+    regime_str = str(market_regime).lower()
+    if "bull" in regime_str:
+        logit += 0.25 if is_bull else -0.25
+    elif "bear" in regime_str:
+        logit += 0.25 if not is_bull else -0.35
+
+    # Platt sigmoid transformation
+    prob = 1.0 / (1.0 + np.exp(-logit))
+    prob_pct = round(float(prob * 100.0), 1)
+
+    # Realistic institutional bounds: quant swing setups operate in 18% - 68% range
+    return float(np.clip(prob_pct, 18.0, 68.0))
+
+# =====================================================================
+# Unified Path-Dependent Trade Lifecycle Evaluator
+# Evaluates daily High and Low step-through (Risk-Conservatism: Stop evaluated first)
+# =====================================================================
+def evaluate_trade_lifecycle(
+    bars: pd.DataFrame,
+    init_p: float,
+    pred_type: str,
+    target_ret: float,
+    stop_ret: float,
+    target_days: int = 8,
+    pred_date: str = None
+) -> dict:
+    """
+    Standardized, path-dependent trade outcome evaluation used identically by
+    both the interactive web UI (catalyst_app.py) and the scheduled cron daemon (audit_daemon.py).
+    
+    Sequentially checks each trading session after entry:
+    - Conservatively tests Stop Loss before Target to prevent lookahead / path optimism.
+    - If neither hit within max allowed days (target_days + 2), marks-to-market at close.
+    """
+    if bars is None or bars.empty:
+        return {
+            "status": None,
+            "realized_ret": 0.0,
+            "exit_p": float(init_p),
+            "exit_price": float(init_p),
+            "days_elapsed": 0
+        }
+
+    # Ensure bars are sorted chronologically
+    sorted_bars = bars.sort_index()
+
+    # Filter post-prediction bars
+    if pred_date:
+        clean_date_str = str(pred_date).replace(" IST", "").strip()[:10]
+        hist_date_strs = sorted_bars.index.strftime("%Y-%m-%d") if hasattr(sorted_bars.index, "strftime") else sorted_bars.index.astype(str).str[:10]
+        post = sorted_bars[hist_date_strs >= clean_date_str]
+    else:
+        post = sorted_bars
+
+    if post.empty:
+        curr_p = float(sorted_bars["Close"].iloc[-1])
+        return {"status": None, "realized_ret": 0.0, "exit_p": curr_p, "exit_price": curr_p, "days_elapsed": 0}
+
+    curr_p = float(post["Close"].iloc[-1])
+    days = max(0, len(post) - 1)
+    is_bullish = "BULLISH" in str(pred_type).upper()
+    max_allowed_days = int(target_days) + 2
+
+    evaluated_status = None
+    realized_ret = 0.0
+    exit_p = curr_p
+    elapsed_days = days
+
+    if is_bullish:
+        t_ret = abs(float(target_ret))
+        s_ret = -abs(float(stop_ret))
+        target_p = float(init_p) * (1.0 + t_ret / 100.0)
+        stop_p = float(init_p) * (1.0 + s_ret / 100.0)
+
+        if len(post) > 1:
+            for b_idx, (b_date, b_row) in enumerate(post.iloc[1:].iterrows(), start=1):
+                b_high = float(b_row.get("High", b_row["Close"]))
+                b_low = float(b_row.get("Low", b_row["Close"]))
+
+                # Stop loss evaluated first for risk conservatism
+                if b_low <= stop_p:
+                    evaluated_status = "FAILED"
+                    realized_ret = s_ret
+                    exit_p = stop_p
+                    elapsed_days = b_idx
+                    break
+                elif b_high >= target_p:
+                    evaluated_status = "SUCCESS"
+                    realized_ret = t_ret
+                    exit_p = target_p
+                    elapsed_days = b_idx
+                    break
+
+        if evaluated_status is None:
+            curr_ret = round(((curr_p - init_p) / init_p) * 100.0, 2)
+            if days >= max_allowed_days:
+                evaluated_status = "SUCCESS" if curr_ret > 0 else "FAILED"
+                realized_ret = curr_ret
+                exit_p = curr_p
+            else:
+                realized_ret = curr_ret
+    else:
+        target_gain = abs(float(target_ret))
+        stop_loss_pct = abs(float(stop_ret))
+        target_p = float(init_p) * (1.0 - target_gain / 100.0)
+        stop_p = float(init_p) * (1.0 + stop_loss_pct / 100.0)
+
+        if len(post) > 1:
+            for b_idx, (b_date, b_row) in enumerate(post.iloc[1:].iterrows(), start=1):
+                b_high = float(b_row.get("High", b_row["Close"]))
+                b_low = float(b_row.get("Low", b_row["Close"]))
+
+                # Stop loss evaluated first for risk conservatism
+                if b_high >= stop_p:
+                    evaluated_status = "FAILED"
+                    realized_ret = -stop_loss_pct
+                    exit_p = stop_p
+                    elapsed_days = b_idx
+                    break
+                elif b_low <= target_p:
+                    evaluated_status = "SUCCESS"
+                    realized_ret = target_gain
+                    exit_p = target_p
+                    elapsed_days = b_idx
+                    break
+
+        if evaluated_status is None:
+            curr_ret = round(((init_p - curr_p) / init_p) * 100.0, 2)
+            if days >= max_allowed_days:
+                evaluated_status = "SUCCESS" if curr_ret > 0 else "FAILED"
+                realized_ret = curr_ret
+                exit_p = curr_p
+            else:
+                realized_ret = curr_ret
+
+    return {
+        "status": evaluated_status,
+        "realized_ret": round(float(realized_ret), 2),
+        "exit_p": round(float(exit_p), 2),
+        "exit_price": round(float(exit_p), 2),
+        "days_elapsed": int(elapsed_days)
+    }

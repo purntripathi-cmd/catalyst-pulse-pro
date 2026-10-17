@@ -6,7 +6,14 @@ import pandas as pd
 import yfinance as yf
 import feedparser
 import numpy as np
-from ticker_utils import match_tickers_in_text
+from ticker_utils import (
+    match_tickers_in_text,
+    is_fno_eligible,
+    get_action_recommendation,
+    calibrate_empirical_probability,
+    evaluate_trade_lifecycle,
+    ROUND_TRIP_FRICTION_PCT
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 file_path = "catalyst_prediction_ledger.csv"
@@ -48,93 +55,26 @@ if not ledger.empty and "Outcome_Status" in ledger.columns:
                 if not bars.empty:
                     init_p = float(row["CMP_At_Prediction"])
                     clean_date_str = str(row["Date"]).replace(" IST", "").strip()[:10]
-                    hist_date_strs = bars.index.strftime("%Y-%m-%d")
-                    post = bars[hist_date_strs >= clean_date_str]
-                    days = max(0, len(post) - 1)
-
-                    curr_p = float(bars["Close"].iloc[-1])
                     pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
-                    is_bullish = ("BULLISH" in pred_type)
-
+                    target_ret = float(row.get("Target_Return_Pct", 4.5 if "BULLISH" in pred_type else -4.0))
+                    stop_ret = float(row.get("Stop_Loss_Pct", -2.5 if "BULLISH" in pred_type else 2.5))
                     target_days = int(row.get("Target_Days", 8)) if not pd.isna(row.get("Target_Days")) else 8
-                    max_allowed_days = target_days + 2
 
-                    evaluated_status = None
-                    realized_ret = None
-                    exit_p = curr_p
-                    elapsed_days = days
+                    res = evaluate_trade_lifecycle(
+                        bars=bars,
+                        init_p=init_p,
+                        pred_type=pred_type,
+                        target_ret=target_ret,
+                        stop_ret=stop_ret,
+                        target_days=target_days,
+                        pred_date=clean_date_str
+                    )
 
-                    if is_bullish:
-                        target_ret = float(row.get("Target_Return_Pct", 4.5))
-                        stop_ret = float(row.get("Stop_Loss_Pct", -2.5))
-                        target_p = init_p * (1.0 + target_ret / 100.0)
-                        stop_p = init_p * (1.0 + stop_ret / 100.0)
-
-                        if len(post) > 1:
-                            for b_idx, (b_date, b_row) in enumerate(post.iloc[1:].iterrows(), start=1):
-                                b_high = float(b_row.get("High", b_row["Close"]))
-                                b_low = float(b_row.get("Low", b_row["Close"]))
-
-                                # Stop loss evaluated first for risk conservatism
-                                if b_low <= stop_p:
-                                    evaluated_status = "FAILED"
-                                    realized_ret = stop_ret
-                                    exit_p = stop_p
-                                    elapsed_days = b_idx
-                                    break
-                                elif b_high >= target_p:
-                                    evaluated_status = "SUCCESS"
-                                    realized_ret = target_ret
-                                    exit_p = target_p
-                                    elapsed_days = b_idx
-                                    break
-
-                        if evaluated_status is None:
-                            curr_ret = round(((curr_p - init_p) / init_p) * 100.0, 2)
-                            if days >= max_allowed_days:
-                                evaluated_status = "SUCCESS" if curr_ret > 0 else "FAILED"
-                                realized_ret = curr_ret
-                                exit_p = curr_p
-                            else:
-                                realized_ret = curr_ret
-                    else:
-                        target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
-                        stop_loss_pct = abs(float(row.get("Stop_Loss_Pct", 2.5)))
-                        target_p = init_p * (1.0 - target_gain / 100.0)
-                        stop_p = init_p * (1.0 + stop_loss_pct / 100.0)
-
-                        if len(post) > 1:
-                            for b_idx, (b_date, b_row) in enumerate(post.iloc[1:].iterrows(), start=1):
-                                b_high = float(b_row.get("High", b_row["Close"]))
-                                b_low = float(b_row.get("Low", b_row["Close"]))
-
-                                if b_high >= stop_p:
-                                    evaluated_status = "FAILED"
-                                    realized_ret = -stop_loss_pct
-                                    exit_p = stop_p
-                                    elapsed_days = b_idx
-                                    break
-                                elif b_low <= target_p:
-                                    evaluated_status = "SUCCESS"
-                                    realized_ret = target_gain
-                                    exit_p = target_p
-                                    elapsed_days = b_idx
-                                    break
-
-                        if evaluated_status is None:
-                            curr_ret = round(((init_p - curr_p) / init_p) * 100.0, 2)
-                            if days >= max_allowed_days:
-                                evaluated_status = "SUCCESS" if curr_ret > 0 else "FAILED"
-                                realized_ret = curr_ret
-                                exit_p = curr_p
-                            else:
-                                realized_ret = curr_ret
-
-                    ledger.at[idx, "Current_CMP"] = exit_p
-                    ledger.at[idx, "Realized_Return_Pct"] = realized_ret
-                    ledger.at[idx, "Days_Elapsed"] = elapsed_days
-                    if evaluated_status:
-                        ledger.at[idx, "Outcome_Status"] = evaluated_status
+                    ledger.at[idx, "Current_CMP"] = res.get("exit_price", res.get("exit_p", init_p))
+                    ledger.at[idx, "Realized_Return_Pct"] = res.get("realized_ret", 0.0)
+                    ledger.at[idx, "Days_Elapsed"] = res.get("days_elapsed", 0)
+                    if res.get("status") in ["SUCCESS", "FAILED"]:
+                        ledger.at[idx, "Outcome_Status"] = res["status"]
                     changed = True
 
 # =====================================================================
@@ -258,15 +198,11 @@ for sym in NIFTY_UNIVERSE:
     s_trend = 15.0 if dist_200 > 0 else -15.0
     final_score = round(((s_runup * 0.35) + (s_vol * 0.45) + (s_trend * 0.20)) * cat_data["mult"], 1)
 
-    prob_adj = 0.0
-    if runup_5d <= 2.5: prob_adj += 8.0
-    elif runup_5d >= 7.5: prob_adj -= 18.0
-
-    if vol_surge >= 2.0 and close_pos >= 65.0: prob_adj += 10.0
-    elif close_pos <= 35.0: prob_adj -= 14.0
-
-    prob_adj += 4.0 if dist_200 > 0 else -8.0
-    prob_1w = int(np.clip(cat_data["p1"] + prob_adj, 10, 92))
+    prob_1w = int(round(calibrate_empirical_probability(
+        score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
+        outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
+        market_regime="Sideways / Rangebound"
+    )))
 
     if final_score >= 18.0 and prob_1w >= 65:
         outlook = "BULLISH"
@@ -314,7 +250,7 @@ if not c_df.empty:
             "Active_Catalyst": row["Catalyst"],
             "CMP_At_Prediction": round(row["CMP"], 2),
             "Predicted_Outlook": row["Outlook"],
-            "Recommended_Action": "🟢 BUY / ACCUMULATE" if is_bull else "🔴 SHORT / FADE (SELL)",
+            "Recommended_Action": get_action_recommendation(row["Outlook"], row["Ticker"]),
             "Holding_Horizon": row["Horizon"],
             "Target_Days": row["Target_Days"],
             "Trigger_Type": "SCHEDULED_CRON_AUTO",
@@ -391,6 +327,11 @@ try:
         if os.path.exists(trades_path):
             try:
                 pt_df = pd.read_csv(trades_path)
+                for col in ["Exit_Reason", "Exit_Timestamp", "Status"]:
+                    if col in pt_df.columns:
+                        pt_df[col] = pt_df[col].astype(object)
+                    else:
+                        pt_df[col] = pd.Series(dtype=object)
                 if not pt_df.empty and "Status" in pt_df.columns:
                     active_mask = pt_df["Status"] == "ACTIVE"
                     cand_map = dict(zip(candidates_df["Ticker"], candidates_df["CMP (₹)"])) if "CMP (₹)" in candidates_df.columns else {}

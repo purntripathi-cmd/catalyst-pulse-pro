@@ -1,6 +1,6 @@
 {
-  "last_run_date": "2026-10-15",
-  "last_run_timestamp": "2026-10-15 15:10:18 IST",
+  "last_run_date": "2026-10-17",
+  "last_run_timestamp": "2026-10-17 15:13:43 IST",
   "trigger": "Manual_Force_Run",
   "executed_count": 0,
   "skipped_duplicate_count": 14,
@@ -12,13 +12,13 @@
     "ONGC",
     "HINDUNILVR",
     "COALINDIA",
-    "ULTRACEMCO",
     "SIEMENS",
     "ABB",
+    "ULTRACEMCO",
     "CPSEETF",
     "RELIANCE",
-    "IOC",
     "SUNPHARMA",
+    "IOC",
     "HINDALCO"
   ]
 }

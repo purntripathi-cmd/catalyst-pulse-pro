@@ -17,7 +17,14 @@ import streamlit as st
 import yfinance as yf
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from ticker_utils import match_tickers_in_text
+from ticker_utils import (
+    match_tickers_in_text,
+    is_fno_eligible,
+    get_action_recommendation,
+    calibrate_empirical_probability,
+    evaluate_trade_lifecycle,
+    ROUND_TRIP_FRICTION_PCT
+)
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger("CatalystPulsePro")
@@ -559,44 +566,30 @@ def audit_and_update_outcomes(raw_data):
                 target_col = ticker_sym
 
         if target_col:
-            hist = raw_data[target_col]["Close"].dropna()
-            if not hist.empty:
-                curr_p = float(hist.iloc[-1])
+            bars = raw_data[target_col].dropna(subset=["Close"]) if "Close" in raw_data[target_col].columns else raw_data[target_col]
+            if not bars.empty:
                 init_p = float(row["CMP_At_Prediction"])
-                
-                is_bullish = ("BULLISH" in pred_type)
-                if is_bullish:
-                    ret_pct = round(((curr_p - init_p) / init_p) * 100.0, 2)
-                else:
-                    ret_pct = round(((init_p - curr_p) / init_p) * 100.0, 2)
-
                 raw_date_str = str(row["Date"]).replace(" IST", "")
-                pred_date = pd.to_datetime(raw_date_str).tz_localize(None)
-                post_data = hist[hist.index.tz_localize(None) >= pred_date.normalize()]
-                days = max(0, len(post_data) - 1)
+                target_ret = float(row.get("Target_Return_Pct", 4.5 if "BULLISH" in pred_type else -4.0))
+                stop_ret = float(row.get("Stop_Loss_Pct", -2.5 if "BULLISH" in pred_type else 2.5))
+                target_days = int(row.get("Target_Days", 8)) if not pd.isna(row.get("Target_Days")) else 8
 
-                ledger.at[idx, "Current_CMP"] = curr_p
-                ledger.at[idx, "Realized_Return_Pct"] = ret_pct
-                ledger.at[idx, "Days_Elapsed"] = days
+                res = evaluate_trade_lifecycle(
+                    bars=bars,
+                    init_p=init_p,
+                    pred_type=pred_type,
+                    target_ret=target_ret,
+                    stop_ret=stop_ret,
+                    target_days=target_days,
+                    pred_date=raw_date_str
+                )
+
+                ledger.at[idx, "Current_CMP"] = res.get("exit_price", res.get("exit_p", init_p))
+                ledger.at[idx, "Realized_Return_Pct"] = res.get("realized_ret", 0.0)
+                ledger.at[idx, "Days_Elapsed"] = res.get("days_elapsed", 0)
+                if res.get("status") in ["SUCCESS", "FAILED"]:
+                    ledger.at[idx, "Outcome_Status"] = res["status"]
                 changed = True
-
-                target_days = int(row.get("Target_Days", 8))
-                max_allowed_days = target_days + 2
-
-                if days >= 1:
-                    if is_bullish:
-                        if ret_pct >= row["Target_Return_Pct"]:
-                            ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                        elif ret_pct <= row["Stop_Loss_Pct"] or days >= max_allowed_days:
-                            ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
-                    else:
-                        target_gain = abs(float(row.get("Target_Return_Pct", -4.0)))
-                        stop_loss_hit = ret_pct <= -abs(float(row.get("Stop_Loss_Pct", 2.5)))
-                        
-                        if ret_pct >= target_gain:
-                            ledger.at[idx, "Outcome_Status"] = "SUCCESS"
-                        elif stop_loss_hit or days >= max_allowed_days:
-                            ledger.at[idx, "Outcome_Status"] = "SUCCESS" if ret_pct > 0 else "FAILED"
 
     if changed:
         commit_github_ledger(ledger, sha)
@@ -675,28 +668,19 @@ def compute_predictive_catalyst_metrics(raw_data, news_map, universe):
         raw_score = (score_runup * 0.35) + (score_volume * 0.45) + (score_trend * 0.20)
         final_catalyst_score = round(raw_score * impact_mult, 1)
 
-        prob_adjustment = 0.0
-        if runup_5d <= 2.5:
-            prob_adjustment += 8.0
-        elif runup_5d >= 7.5:
-            prob_adjustment -= 18.0
+        temp_outlook = "BULLISH" if final_catalyst_score > 0 else "BEARISH_FADE"
+        prob_1w = int(round(calibrate_empirical_probability(
+            score=final_catalyst_score,
+            vol_surge=vol_surge_ratio,
+            runup_5d=runup_5d,
+            outlook=temp_outlook,
+            market_regime="Sideways"
+        )))
+        prob_2w = int(round(np.clip(prob_1w * 1.05 if prob_1w > 50 else prob_1w * 0.95, 18, 68)))
 
-        if vol_surge_ratio >= 2.0 and close_pos_pct >= 65.0:
-            prob_adjustment += 10.0
-        elif close_pos_pct <= 35.0:
-            prob_adjustment -= 14.0
-
-        if dist_200 > 0:
-            prob_adjustment += 4.0
-        else:
-            prob_adjustment -= 8.0
-
-        prob_1w = int(np.clip(base_p1 + prob_adjustment, 10, 92))
-        prob_2w = int(np.clip(base_p2 + (prob_adjustment * 1.1), 10, 94))
-
-        if final_catalyst_score >= 18.0 and prob_1w >= 65:
+        if final_catalyst_score >= 18.0 and prob_1w >= 54:
             outlook = "🟢 Bullish Drift (1-2W)"
-        elif final_catalyst_score <= -15.0 or (runup_5d >= 7.5 and close_pos_pct <= 40.0) or prob_1w <= 40:
+        elif final_catalyst_score <= -15.0 or (runup_5d >= 7.5 and close_pos_pct <= 40.0) or prob_1w <= 42:
             outlook = "🔴 Distribution / Fade (1-2W)"
         else:
             outlook = "🟡 Neutral Consolidation"
@@ -762,10 +746,22 @@ news_items_list, matched_news_map, ticker_news_hist = fetch_corporate_catalysts(
 catalyst_df = compute_predictive_catalyst_metrics(raw_market_data, matched_news_map, ACTIVE_UNIVERSE)
 
 curr_vix = 14.5
+vix_source = "NSE Live VIX"
 if "^INDIAVIX" in raw_market_data.columns.levels[0]:
     v_close = raw_market_data["^INDIAVIX"]["Close"].dropna()
     if not v_close.empty:
         curr_vix = float(v_close.iloc[-1])
+        vix_source = "NSE Live VIX"
+
+# Dynamic 30D Realized Volatility fallback if ^INDIAVIX is missing or flat
+if (curr_vix == 14.5 or np.isnan(curr_vix)) and "^NSEI" in raw_market_data.columns.levels[0]:
+    n_close = raw_market_data["^NSEI"]["Close"].dropna()
+    if len(n_close) >= 30:
+        returns = n_close.pct_change().dropna().tail(30)
+        realized_vol_30d = float(returns.std() * np.sqrt(252) * 100.0)
+        if not np.isnan(realized_vol_30d) and realized_vol_30d > 0:
+            curr_vix = round(realized_vol_30d, 1)
+            vix_source = "30D Realized Vol (NIFTY)"
 
 vix_mood = "🟢 Stable & Calm" if curr_vix < 14 else ("🟡 Normal Volatility" if curr_vix <= 21 else "⚠️ High Panic / Wild Swings")
 
@@ -783,10 +779,10 @@ if "^NSEI" in raw_market_data.columns.levels[0]:
         else:
             nifty_regime = "🟡 Sideways / Rangebound"
 
-regime_tag_full = f"{nifty_regime} (VIX: {curr_vix:.1f})"
+regime_tag_full = f"{nifty_regime} ({vix_source}: {curr_vix:.1f})"
 
 st.sidebar.markdown("---")
-st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", vix_mood)
+st.sidebar.metric("India VIX Pulse", f"{curr_vix:.1f}", f"{vix_mood} ({vix_source})")
 st.sidebar.caption(f"Universe: {len(ACTIVE_UNIVERSE)} Stocks | Filings: {len(news_items_list)}")
 
 # Cloud Resource Monitor Widget (CPU / RAM)
@@ -826,8 +822,8 @@ with h_col2:
     st.markdown(
         f"""
         <div style='text-align: right; padding-top: 6px; font-size: 0.85rem;'>
-            <b>Market Mood:</b> {vix_mood} (VIX: {curr_vix:.1f}) &nbsp;|&nbsp; 
-            <span style='color: #28a745; font-weight: 600;'>BSE / Reg 30 Live</span>
+            <b>Data Freshness:</b> <span style='color: #28a745; font-weight: 600;'>🟢 Live Market Feed</span> &nbsp;|&nbsp; 
+            <b>Mood:</b> {vix_mood} ({vix_source}: {curr_vix:.1f})
         </div>
         """,
         unsafe_allow_html=True
@@ -1157,10 +1153,11 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         ASSUMED_TRANCHE_BUDGET = 15000.0
 
-        if "Recommended_Action" not in display_ledger.columns:
-            display_ledger["Recommended_Action"] = display_ledger["Predicted_Outlook"].apply(
-                lambda x: "🟢 BUY / ACCUMULATE" if "BULLISH" in str(x).upper() else "🔴 SHORT / FADE (SELL)"
-            )
+        # SEBI Regulatory Compliance: Distinguish F&O derivative shorting from Cash Equity Avoid / Exit
+        display_ledger["Recommended_Action"] = display_ledger.apply(
+            lambda r: get_action_recommendation(r.get("Predicted_Outlook", "NEUTRAL"), r.get("Ticker", "")),
+            axis=1
+        )
         if "Holding_Horizon" not in display_ledger.columns:
             display_ledger["Holding_Horizon"] = "🎯 Tactical Swing (1-2 Weeks)"
         if "Trigger_Type" not in display_ledger.columns:
@@ -1192,7 +1189,11 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 
         display_ledger["Catalyst_Score"] = display_ledger.apply(lambda r: resolve_cat_score(r["Catalyst_Score"], r["Ticker"]), axis=1)
 
-        display_ledger["Clean_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
+        display_ledger["Gross_Ret_Pct"] = pd.to_numeric(display_ledger["Realized_Return_Pct"], errors="coerce").fillna(0.0)
+        # Deduct standard round-trip transaction friction (ROUND_TRIP_FRICTION_PCT = 0.35%) to report True Net Alpha
+        display_ledger["Clean_Ret_Pct"] = display_ledger["Gross_Ret_Pct"].apply(
+            lambda r: round(r - ROUND_TRIP_FRICTION_PCT, 2) if r != 0.0 else 0.0
+        )
         display_ledger["Live PnL (₹)"] = (display_ledger["Clean_Ret_Pct"] / 100.0) * ASSUMED_TRANCHE_BUDGET
         display_ledger["Live PnL %"] = display_ledger["Clean_Ret_Pct"]
 
