@@ -226,6 +226,147 @@ def _safe_read_csv(filepath: str) -> pd.DataFrame:
             return pd.DataFrame()
 
 
+IST_TZ = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def sync_paper_trades_with_live_quotes():
+    """Fetches latest live market quotes and updates Live_CMP, PnL_Rs, and PnL_Pct in data/paper_trades.csv."""
+    if not os.path.exists(LOCAL_TRADES_CSV) or os.path.getsize(LOCAL_TRADES_CSV) == 0:
+        return
+    try:
+        df = _safe_read_csv(LOCAL_TRADES_CSV)
+        if df.empty or "Ticker" not in df.columns:
+            return
+        active_mask = df["Status"] == "ACTIVE" if "Status" in df.columns else pd.Series([True] * len(df))
+        active_syms = tuple(sorted(set(df.loc[active_mask, "Ticker"].astype(str).str.replace(".NS", "", regex=False).str.strip().str.upper().tolist())))
+        if not active_syms:
+            return
+        quotes = fetch_live_market_quotes(active_syms)
+        if not quotes:
+            return
+        changed = False
+        for i in df[active_mask].index:
+            sym = str(df.loc[i, "Ticker"]).replace(".NS", "").strip().upper()
+            live_p = quotes.get(sym) or quotes.get(f"{sym}.NS")
+            if live_p and float(live_p) > 0:
+                entry_p = float(df.loc[i, "Entry_Price"]) if not pd.isna(df.loc[i, "Entry_Price"]) else float(live_p)
+                qty = int(df.loc[i, "Executed_Qty"]) if not pd.isna(df.loc[i, "Executed_Qty"]) else 1
+                df.loc[i, "Live_CMP"] = round(float(live_p), 2)
+                df.loc[i, "PnL_Rs"] = round((float(live_p) - entry_p) * qty, 2)
+                df.loc[i, "PnL_Pct"] = round(((float(live_p) - entry_p) / entry_p) * 100.0, 2) if entry_p > 0 else 0.0
+                changed = True
+        if changed:
+            df.to_csv(LOCAL_TRADES_CSV, index=False)
+    except Exception as e:
+        logger.warning(f"Error syncing paper trades live quotes: {e}")
+
+
+def trigger_dl_global_refresh():
+    """Purges all caches, re-syncs live market prices across all tables & analytics, and reruns on the active tab."""
+    saved_active = st.session_state.get("active_nav_tab", None)
+    st.cache_data.clear()
+    try:
+        if "ticker_utils" in sys.modules:
+            sys.modules["ticker_utils"]._EMPIRICAL_LEDGER_MEMORY_CACHE = None
+    except Exception:
+        pass
+    sync_paper_trades_with_live_quotes()
+    st.session_state["last_full_refresh_dt"] = datetime.datetime.now(IST_TZ)
+    st.session_state["manual_refresh_count"] = st.session_state.get("manual_refresh_count", 0) + 1
+    st.session_state["used_market_cache_fallback"] = False
+    if saved_active:
+        st.session_state["active_nav_tab"] = saved_active
+        try:
+            st.query_params["tab"] = saved_active
+        except Exception:
+            pass
+    st.rerun()
+
+
+def render_dl_table_freshness_banner(table_name: str, data_ts_str: str = None, key_suffix: str = ""):
+    """
+    Renders a flashing stale-data warning indicator directly above a table when the table
+    contains older/cached snapshot data or hasn't been refreshed within 15 minutes,
+    along with an immediate 1-click Refresh button.
+    """
+    st.markdown(
+        """
+        <style>
+        @keyframes dlFlashStale {
+            0% { opacity: 1.0; background-color: #fff1f2; border-color: #e11d48; box-shadow: 0 0 8px rgba(225, 29, 72, 0.35); }
+            50% { opacity: 0.68; background-color: #ffe4e6; border-color: #f43f5e; box-shadow: 0 0 2px rgba(225, 29, 72, 0.10); }
+            100% { opacity: 1.0; background-color: #fff1f2; border-color: #e11d48; box-shadow: 0 0 8px rgba(225, 29, 72, 0.35); }
+        }
+        .dl-stale-flash-banner {
+            animation: dlFlashStale 1.35s infinite ease-in-out;
+            border: 1.5px solid #e11d48;
+            border-left: 5px solid #be123c;
+            border-radius: 6px;
+            padding: 6px 12px;
+            margin-bottom: 6px;
+            font-size: 0.78rem;
+            color: #881337;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .dl-fresh-synced-banner {
+            background-color: #f0fdf4;
+            border: 1px solid #86efac;
+            border-left: 4px solid #16a34a;
+            border-radius: 6px;
+            padding: 5px 12px;
+            margin-bottom: 6px;
+            font-size: 0.76rem;
+            color: #14532d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    now_ist = datetime.datetime.now(IST_TZ)
+    last_dt = st.session_state.get("last_full_refresh_dt", None)
+    manual_count = st.session_state.get("manual_refresh_count", 0)
+    used_fallback = st.session_state.get("used_market_cache_fallback", False)
+
+    age_mins = ((now_ist - last_dt).total_seconds() / 60.0) if last_dt is not None else 999.0
+    is_stale = (manual_count == 0) or (age_mins > 15.0) or used_fallback
+
+    c_ban, c_btn = st.columns([4.3, 0.7])
+    with c_ban:
+        if is_stale:
+            ts_note = f"Snapshot: {data_ts_str}" if data_ts_str else (
+                f"Last Sync: {int(age_mins)}m ago" if last_dt is not None else "Cached / Snapshot Data Loaded"
+            )
+            st.markdown(
+                f"""
+                <div class="dl-stale-flash-banner">
+                    <span>⚡ <b>OLD / CACHED DATA DETECTED — {table_name}:</b> Showing cached/historical snapshot ({ts_note}). Click <b>🔄 Refresh</b> to fetch latest live prices & analytics!</span>
+                    <span style="background:#e11d48; color:white; padding:1px 7px; border-radius:10px; font-size:0.70rem; font-weight:700;">FLASH ALERT: REFRESH NEEDED</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            sync_str = last_dt.strftime("%H:%M:%S IST") if last_dt else now_ist.strftime("%H:%M:%S IST")
+            st.markdown(
+                f"""
+                <div class="dl-fresh-synced-banner">
+                    <span>🟢 <b>LIVE DATA SYNCED — {table_name}:</b> All market prices, P&L & analytics freshly updated at <b>{sync_str}</b> ({age_mins:.1f}m ago).</span>
+                    <span style="background:#16a34a; color:white; padding:1px 7px; border-radius:10px; font-size:0.70rem; font-weight:700;">UP TO DATE</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    with c_btn:
+        if st.button("🔄 Refresh", key=f"btn_tbl_ref_{key_suffix}", use_container_width=True, help=f"Refresh {table_name} and all app tables with latest live data"):
+            trigger_dl_global_refresh()
+
+
+
 def get_active_long_term_trades(live_market_lookup=None):
     """
     Scans data/paper_trades.csv and catalyst_prediction_ledger.csv for active positions.
@@ -830,6 +971,12 @@ def render_active_long_term_portfolio_snapshot_section(
                 )
             return styles
 
+        latest_entry_ts = str(disp_df["Execution_Timestamp"].max()) if "Execution_Timestamp" in disp_df.columns and not disp_df.empty else None
+        render_dl_table_freshness_banner(
+            table_name=title,
+            data_ts_str=latest_entry_ts,
+            key_suffix=f"{key_prefix}_lt_snap"
+        )
         st.dataframe(
             styled_df.style.apply(style_pnl, axis=None).format({
                 "Entry Price (₹)": "₹{:.2f}",
@@ -1501,9 +1648,8 @@ def render_dual_logic_studio():
             unsafe_allow_html=True
         )
     with audit_cols[1]:
-        if st.button("🔄 Refresh Integrity Audit", key="btn_refresh_audit", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
+        if st.button("🔄 Refresh Integrity Audit & All Tables", key="btn_refresh_audit", use_container_width=True):
+            trigger_dl_global_refresh()
 
     # 4 Diagnostic Panels
     d_col1, d_col2, d_col3, d_col4 = st.columns(4)
@@ -1594,6 +1740,11 @@ def render_dual_logic_studio():
     st.caption("5 Non-overlapping Out-of-Sample folds with purging and embargoing, eliminating in-sample lookahead data leakage.")
 
     pwfcv_res = engine.evaluate_walk_forward_cv()
+    render_dl_table_freshness_banner(
+        table_name="P-WFCV Out-of-Sample Validation Folds",
+        data_ts_str=audit.get("timestamp", None),
+        key_suffix="studio_pwfcv"
+    )
     st.dataframe(
         pwfcv_res["folds_table"],
         use_container_width=True,
@@ -1614,6 +1765,11 @@ def render_dual_logic_studio():
     st.caption("Benchmark metrics comparing Unoptimized Baseline vs. Dual-Logic Closed-Loop Optimized & Locked performance across 20-year stress cycles.")
 
     matrix_df = engine.generate_validation_matrix()
+    render_dl_table_freshness_banner(
+        table_name="20-Year Stress-Cycle Backtest Validation Matrix",
+        data_ts_str=audit.get("timestamp", None),
+        key_suffix="studio_val_matrix"
+    )
     st.dataframe(
         matrix_df,
         use_container_width=True,
@@ -1652,6 +1808,11 @@ def render_dual_logic_studio():
             preds_df = engine.logic_a_predict(sel_year)
             buy_count = preds_df["Predicted_Buy_Signal"].sum()
             st.markdown(f"**Blind Predictions for {sel_year}** ({buy_count} Predicted Buy Signals):")
+            render_dl_table_freshness_banner(
+                table_name=f"Logic A Blind Predictions ({sel_year})",
+                data_ts_str=audit.get("timestamp", None),
+                key_suffix="studio_logic_a"
+            )
             st.dataframe(
                 preds_df.sort_values(by="Score", ascending=False),
                 use_container_width=True,
@@ -1669,6 +1830,11 @@ def render_dual_logic_studio():
         actuals_df = engine.logic_b_ground_truth(sel_year)
         success_count = actuals_df["Actual_Success"].sum()
         st.markdown(f"**Verified Actual Outcomes for {sel_year}** ({success_count}/{len(actuals_df)} Achieved >= 10.0% 3Y CAGR):")
+        render_dl_table_freshness_banner(
+            table_name=f"Logic B Verified Ground-Truth Outcomes ({sel_year})",
+            data_ts_str=audit.get("timestamp", None),
+            key_suffix="studio_logic_b"
+        )
         st.dataframe(
             actuals_df.sort_values(by="Actual_3Y_CAGR", ascending=False),
             use_container_width=True,
@@ -1682,6 +1848,8 @@ def render_dual_logic_studio():
     with tab_c:
         st.markdown("#### ⚖️ Logic C: Evaluator, Comparative Error & Drift Monitor")
         st.caption("Performs comparative error analysis, evaluates MAPE, CAGR deviations, and monitors for statistical drift.")
+        if st.button("🔄 Refresh Logic C Drift & Evaluation Metrics", key="btn_ref_logic_c", use_container_width=False):
+            trigger_dl_global_refresh()
 
         eval_res = engine.logic_c_evaluate([sel_year] if sel_year != 2008 else None)
         c_c1, c_c2, c_c3, c_c4 = st.columns(4)
@@ -1708,6 +1876,11 @@ def render_dual_logic_studio():
         df_all["Predicted_Regime"] = engine.regime_classifier.predict_regime_name(df_all)
         
         regime_summary = df_all.groupby(["Year", "Stress_Event", "Market_Regime", "Predicted_Regime"]).size().reset_index(name="Asset_Count")
+        render_dl_table_freshness_banner(
+            table_name="XGBoost / LightGBM Regime Transition Matrix",
+            data_ts_str=audit.get("timestamp", None),
+            key_suffix="studio_ml_regime"
+        )
         st.dataframe(
             regime_summary.tail(15),
             use_container_width=True,
@@ -1722,6 +1895,11 @@ def render_dual_logic_studio():
         st.caption("DBSCAN & K-Means clustering isolating physical infrastructure, power grids, and asset-heavy moats from labor/software disruption.")
 
         clustered_df = engine.cluster_engine.fit_predict(engine.data[engine.data["Year"] == 2024])
+        render_dl_table_freshness_banner(
+            table_name="DBSCAN & K-Means AI Disruption Vulnerability Cohorts",
+            data_ts_str=audit.get("timestamp", None),
+            key_suffix="studio_clusters"
+        )
         st.dataframe(
             clustered_df[["Ticker", "Name", "Sector", "Cohort_Name", "Asset_Moat_Score", "AI_Vulnerability_Score", "CapEx_Intensity"]].drop_duplicates(subset=["Ticker"]),
             use_container_width=True,
@@ -1739,7 +1917,13 @@ def render_dual_logic_studio():
         if os.path.exists(RUNS_CSV_PATH):
             runs_df = _safe_read_csv(RUNS_CSV_PATH)
             if not runs_df.empty:
+                latest_run_ts = str(runs_df["timestamp"].iloc[-1]) if "timestamp" in runs_df.columns else None
                 st.markdown(f"**Optimization Run History ({len(runs_df)} Trials Recorded):**")
+                render_dl_table_freshness_banner(
+                    table_name="Autonomous Agent Optimization Run History",
+                    data_ts_str=latest_run_ts,
+                    key_suffix="studio_runs_csv"
+                )
                 st.dataframe(runs_df.tail(20), use_container_width=True, hide_index=True)
 
         if os.path.exists(AGENT_LOG_PATH):
@@ -2344,9 +2528,8 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             unsafe_allow_html=True
         )
     with c_cad3:
-        if st.button("🔄 Force Recalculate Now", key="btn_manual_refresh_dl", use_container_width=True, help="Force immediate calculation with zero continuous background polling"):
-            st.cache_data.clear()
-            st.rerun()
+        if st.button("🔄 Force Recalculate Now", key="btn_manual_refresh_dl", use_container_width=True, help="Force immediate calculation and refresh all tables with zero continuous background polling"):
+            trigger_dl_global_refresh()
 
     # Inline Cloud Resource Telemetry Health Card
     if render_resource_monitor_card is not None:
@@ -2557,6 +2740,11 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
         }
         disp_df = filtered_table[valid_cols].rename(columns=rename_cols)
 
+        render_dl_table_freshness_banner(
+            table_name="Complete Live Deep-Value Screener & Multi-Factor Moat Table",
+            data_ts_str=now_time,
+            key_suffix="sec6_full_screener"
+        )
         st.dataframe(
             disp_df.style.format({
                 "CMP (₹)": "₹{:.2f}",
@@ -2606,11 +2794,14 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             if st.button("🔄 Rerun 20Y Analytics Pipeline", key="btn_rerun_20y_analytics", use_container_width=True, help="Reruns the full 20-year (2006–2026) multi-regime backtest across 756 stress points and updates the validation matrix."):
                 with st.spinner("Rerunning 20-Year Historical Analytics & Stress-Cycle Evaluations..."):
                     engine.generate_validation_matrix()
-                    st.cache_data.clear()
-                    st.success("✅ 20-Year Historical Analytics successfully verified and updated!")
-                    st.rerun()
+                    trigger_dl_global_refresh()
 
         matrix_df = engine.generate_validation_matrix()
+        render_dl_table_freshness_banner(
+            table_name="Section 6 Historical Backtest Validation Matrix (2006–2026)",
+            data_ts_str=now_time,
+            key_suffix="sec6_val_matrix"
+        )
         st.dataframe(
             matrix_df,
             use_container_width=True,

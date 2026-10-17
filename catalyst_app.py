@@ -422,6 +422,7 @@ def fetch_corporate_catalysts(active_universe):
 @st.cache_data(ttl=900, show_spinner=False)
 def load_market_data(tickers):
     download_list = list(tickers) + ["^NSEI", "^INDIAVIX"]
+    now_str = datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
     try:
         df = yf.download(download_list, period="1y", interval="1d", group_by="ticker", auto_adjust=True, threads=True)
         if df is not None and not df.empty and len(df) > 10:
@@ -430,6 +431,8 @@ def load_market_data(tickers):
                 df.to_parquet(MARKET_CACHE_FILE)
             except Exception:
                 pass
+            df.attrs["is_cache_fallback"] = False
+            df.attrs["fetched_at_ist"] = now_str
             return df
     except Exception as e:
         logger.error(f"yfinance download failed: {e}")
@@ -437,10 +440,17 @@ def load_market_data(tickers):
     if os.path.exists(MARKET_CACHE_FILE):
         try:
             logger.info("Loaded market data from local snapshot cache.")
-            return pd.read_parquet(MARKET_CACHE_FILE)
+            cached_df = pd.read_parquet(MARKET_CACHE_FILE)
+            mtime_dt = datetime.datetime.fromtimestamp(os.path.getmtime(MARKET_CACHE_FILE), tz=IST)
+            cached_df.attrs["is_cache_fallback"] = True
+            cached_df.attrs["fetched_at_ist"] = mtime_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+            return cached_df
         except Exception as e:
             logger.warning(f"Failed to read market snapshot cache: {e}")
-    return pd.DataFrame()
+    empty_df = pd.DataFrame()
+    empty_df.attrs["is_cache_fallback"] = True
+    empty_df.attrs["fetched_at_ist"] = now_str
+    return empty_df
 
 # =====================================================================
 # Section 3: AI Vector RAG & Semantic Disclosure Engine
@@ -909,6 +919,168 @@ if "active_nav_tab" not in st.session_state:
 elif url_tab in NAV_TABS and st.session_state["active_nav_tab"] != url_tab:
     st.session_state["active_nav_tab"] = url_tab
 
+if "last_global_refresh_ts" not in st.session_state:
+    st.session_state["last_global_refresh_ts"] = datetime.datetime.now(IST)
+if "manual_refresh_count" not in st.session_state:
+    st.session_state["manual_refresh_count"] = 0
+
+def trigger_full_app_refresh():
+    """Purges all caches, re-syncs live market quotes, RSS filings, GitHub ledger, and Dual-Logic tables, then reruns on the active tab."""
+    saved_active = st.session_state.get("active_nav_tab", NAV_TABS[0])
+    st.cache_data.clear()
+    try:
+        if "ticker_utils" in sys.modules:
+            sys.modules["ticker_utils"]._EMPIRICAL_LEDGER_MEMORY_CACHE = None
+    except Exception:
+        pass
+    try:
+        from dual_logic_ui import sync_paper_trades_with_live_quotes
+        sync_paper_trades_with_live_quotes()
+    except Exception:
+        pass
+    st.session_state["last_global_refresh_ts"] = datetime.datetime.now(IST)
+    st.session_state["manual_refresh_count"] = st.session_state.get("manual_refresh_count", 0) + 1
+    st.session_state["active_nav_tab"] = saved_active
+    st.query_params["tab"] = saved_active
+    st.rerun()
+
+def _get_app_freshness_state(data_ts_str: str = ""):
+    now_ist = datetime.datetime.now(IST)
+    last_ref = st.session_state.get("last_global_refresh_ts", now_ist)
+    if getattr(last_ref, "tzinfo", None) is None:
+        last_ref = last_ref.replace(tzinfo=IST)
+    age_mins = max(0.0, (now_ist - last_ref).total_seconds() / 60.0)
+    manual_cnt = st.session_state.get("manual_refresh_count", 0)
+    is_cache_fb = bool(raw_market_data.attrs.get("is_cache_fallback", False)) if hasattr(raw_market_data, "attrs") else False
+    fetched_str = str(raw_market_data.attrs.get("fetched_at_ist", last_ref.strftime("%Y-%m-%d %H:%M:%S IST"))) if hasattr(raw_market_data, "attrs") else last_ref.strftime("%Y-%m-%d %H:%M:%S IST")
+
+    is_old_record = False
+    if data_ts_str:
+        try:
+            clean_ts = str(data_ts_str).replace(" IST", "").strip()
+            parsed_dt = pd.to_datetime(clean_ts, errors="coerce")
+            if pd.notna(parsed_dt):
+                today_str = now_ist.strftime("%Y-%m-%d")
+                if parsed_dt.strftime("%Y-%m-%d") < today_str and manual_cnt == 0:
+                    is_old_record = True
+        except Exception:
+            pass
+
+    is_stale = (manual_cnt == 0) or (age_mins >= 15.0) or is_cache_fb or is_old_record
+    return is_stale, age_mins, last_ref, fetched_str, is_cache_fb
+
+def render_tab_refresh_bar(tab_label: str, key_suffix: str):
+    """Renders a dedicated Refresh button and live/flashing data status bar at the top of each tab."""
+    is_stale, age_mins, last_ref, fetched_str, is_cache_fb = _get_app_freshness_state()
+    last_ref_str = last_ref.strftime("%Y-%m-%d %H:%M:%S IST")
+    bar_c1, bar_c2 = st.columns([4.4, 1.1])
+    with bar_c1:
+        if is_stale:
+            reason_txt = (
+                f"Offline snapshot cache active ({fetched_str})"
+                if is_cache_fb else (
+                    f"Initial cached session load ({fetched_str}) — click Refresh to force live sync"
+                    if st.session_state.get("manual_refresh_count", 0) == 0
+                    else f"Data last synced {int(age_mins)}m ago ({last_ref_str})"
+                )
+            )
+            st.markdown(
+                f"""
+                <style>
+                @keyframes pulseTabFlash {{
+                    0% {{ opacity: 1.0; background-color: #fff3cd; border-color: #ff9800; box-shadow: 0 0 8px rgba(255,152,0,0.45); }}
+                    50% {{ opacity: 0.55; background-color: #ffe082; border-color: #d32f2f; box-shadow: 0 0 14px rgba(211,47,47,0.65); }}
+                    100% {{ opacity: 1.0; background-color: #fff3cd; border-color: #ff9800; box-shadow: 0 0 8px rgba(255,152,0,0.45); }}
+                }}
+                .pulse-tab-stale-banner {{
+                    animation: pulseTabFlash 1.35s infinite ease-in-out;
+                    border: 2px solid #ff9800;
+                    border-left: 6px solid #d32f2f;
+                    border-radius: 6px;
+                    padding: 7px 12px;
+                    margin-bottom: 6px;
+                    font-size: 0.80rem;
+                    color: #7f1d1d;
+                    font-weight: 700;
+                }}
+                </style>
+                <div class="pulse-tab-stale-banner">
+                    ⚡ <span>CACHED / OLD DATA DETECTED IN {tab_label.upper()}:</span>
+                    <span style="font-weight:600; color:#92400e;">{reason_txt}. Press <b>🔄 Refresh All Tables</b> to fetch latest live data!</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"""
+                <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-left:5px solid #16a34a; border-radius:6px; padding:6px 12px; margin-bottom:6px; font-size:0.79rem; color:#166534; display:flex; justify-content:space-between; align-items:center;">
+                    <span>🟢 <b>{tab_label} — All Tables Live & Synced</b></span>
+                    <span style="font-size:0.74rem; color:#15803d;">Last Live Sync: <b>{last_ref_str}</b> ({age_mins:.1f}m ago)</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    with bar_c2:
+        if st.button("🔄 Refresh All Tables", key=f"btn_tab_ref_{key_suffix}", use_container_width=True, help="Purge all caches and refresh all tables & analytics across this tab"):
+            trigger_full_app_refresh()
+
+def render_table_freshness_banner(table_name: str, arg2: str = "", arg3: str = ""):
+    """Renders a flashing warning indicator directly above a table when it contains old/cached data, plus an inline Refresh button."""
+    if arg3:
+        data_ts_str = arg2
+        key_suffix = arg3
+    else:
+        data_ts_str = ""
+        key_suffix = arg2 or table_name
+    is_stale, age_mins, last_ref, fetched_str, is_cache_fb = _get_app_freshness_state(data_ts_str=data_ts_str)
+    last_ref_str = last_ref.strftime("%Y-%m-%d %H:%M:%S IST")
+    t_col1, t_col2 = st.columns([4.8, 0.9])
+    with t_col1:
+        if is_stale:
+            src_note = f"Record Timestamp: {data_ts_str} | " if data_ts_str else ""
+            st.markdown(
+                f"""
+                <style>
+                @keyframes pulseTableFlash {{
+                    0% {{ opacity: 1.0; background-color: #fffbeb; border-color: #f59e0b; }}
+                    50% {{ opacity: 0.48; background-color: #fde68a; border-color: #dc2626; }}
+                    100% {{ opacity: 1.0; background-color: #fffbeb; border-color: #f59e0b; }}
+                }}
+                .pulse-table-flash {{
+                    animation: pulseTableFlash 1.3s infinite ease-in-out;
+                    border: 1.5px solid #f59e0b;
+                    border-left: 5px solid #dc2626;
+                    border-radius: 6px;
+                    padding: 5px 11px;
+                    margin-bottom: 4px;
+                    font-size: 0.77rem;
+                    color: #991b1b;
+                    font-weight: 700;
+                }}
+                </style>
+                <div class="pulse-table-flash">
+                    ⚠️ <span>OLD / CACHED TABLE DATA — {table_name}:</span>
+                    <span style="font-weight:600; color:#78350f;">{src_note}Snapshot from {fetched_str}. Click <b>🔄 Refresh</b> to sync latest live market data!</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            src_note = f"Record Timestamp: {data_ts_str} | " if data_ts_str else ""
+            st.markdown(
+                f"""
+                <div style="background:#f0fdf4; border:1px solid #bbf7d0; border-left:4px solid #16a34a; border-radius:5px; padding:4px 10px; margin-bottom:4px; font-size:0.75rem; color:#166534; display:flex; justify-content:space-between; align-items:center;">
+                    <span>🟢 <b>LIVE DATA SYNCED — {table_name}</b></span>
+                    <span style="color:#15803d;">{src_note}Synced: <b>{last_ref_str}</b> ({age_mins:.1f}m ago)</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    with t_col2:
+        if st.button("🔄 Refresh", key=f"btn_tbl_ref_{key_suffix}", use_container_width=True, help=f"Refresh {table_name} and all analytics with latest live data"):
+            trigger_full_app_refresh()
+
 h_col1, h_col2, h_col3 = st.columns([1.5, 1.2, 0.4])
 
 with h_col1:
@@ -918,10 +1090,16 @@ with h_col1:
     )
 
 with h_col2:
+    _hdr_stale, _hdr_age, _hdr_last_ref, _hdr_fetched, _hdr_fb = _get_app_freshness_state()
+    _hdr_badge = (
+        "<span style='color: #dc2626; font-weight: 700;'>⚠️ Cached Snapshot (Click Refresh)</span>"
+        if _hdr_stale else
+        f"<span style='color: #28a745; font-weight: 600;'>🟢 Live Market Feed ({_hdr_last_ref.strftime('%H:%M:%S IST')})</span>"
+    )
     st.markdown(
         f"""
         <div style='text-align: right; padding-top: 6px; font-size: 0.85rem;'>
-            <b>Data Freshness:</b> <span style='color: #28a745; font-weight: 600;'>🟢 Live Market Feed</span> &nbsp;|&nbsp; 
+            <b>Data Freshness:</b> {_hdr_badge} &nbsp;|&nbsp; 
             <b>Mood:</b> {vix_mood} ({vix_source}: {curr_vix:.1f})
         </div>
         """,
@@ -929,12 +1107,8 @@ with h_col2:
     )
 
 with h_col3:
-    if st.button("🔄 Refresh", use_container_width=True, help="Purge internal data cache and reload without tab reset"):
-        saved_active = st.session_state.get("active_nav_tab", NAV_TABS[0])
-        st.cache_data.clear()
-        st.session_state["active_nav_tab"] = saved_active
-        st.query_params["tab"] = saved_active
-        st.rerun()
+    if st.button("🔄 Refresh", key="btn_top_header_refresh", use_container_width=True, help="Purge all internal data caches and refresh all tables & analytics without tab reset"):
+        trigger_full_app_refresh()
 
 def on_tab_change():
     st.query_params["tab"] = st.session_state["active_nav_tab"]
@@ -974,6 +1148,7 @@ def apply_top3_bot3_styling(df):
 
 # VIEW 1: 3-Level Screener
 if nav_choice == "🎯 Dynamic 1-2 Week Screener":
+    render_tab_refresh_bar("Tab 1: Dynamic 1-2 Week Screener & Bear-Market Overlay", "tab1_top")
     if catalyst_df.empty:
         st.warning("⚠️ Market data feed synchronizing...")
     else:
@@ -987,6 +1162,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         with c1:
             st.markdown(f"<span style='color: #28a745; font-weight: 700;'>🟢 Top Expected to Move UP ({len(up_candidates)})</span>", unsafe_allow_html=True)
             if not up_candidates.empty:
+                render_table_freshness_banner("Top Expected to Move UP (Bullish Candidates)", "tab1_up")
                 st.dataframe(
                     up_candidates[cols_summary].style.apply(apply_top3_bot3_styling, axis=None).format({
                         "CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%",
@@ -1000,6 +1176,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         with c2:
             st.markdown(f"<span style='color: #dc3545; font-weight: 700;'>🔴 Top Expected to Fade / Breakdown ({len(down_candidates)})</span>", unsafe_allow_html=True)
             if not down_candidates.empty:
+                render_table_freshness_banner("Top Expected to Fade / Breakdown (Bearish Candidates)", "tab1_down")
                 st.dataframe(
                     down_candidates[cols_summary].style.apply(apply_top3_bot3_styling, axis=None).format({
                         "CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%",
@@ -1032,6 +1209,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         with q_tab1:
             df_orders = catalyst_df[catalyst_df["Catalyst Group"] == "Order Wins & Capex"].sort_values(by="Catalyst Score", ascending=False)
             if not df_orders.empty:
+                render_table_freshness_banner("Order Wins & Capex Quadrant", "tab1_q_orders")
                 st.dataframe(df_orders[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
                 st.info("No fresh contract wins or capex announcements recorded in current batch.")
@@ -1039,6 +1217,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         with q_tab2:
             df_demerge = catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"].sort_values(by="Catalyst Score", ascending=False)
             if not df_demerge.empty:
+                render_table_freshness_banner("Demergers & Mergers Quadrant", "tab1_q_demerge")
                 st.dataframe(df_demerge[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
                 st.info("No active demerger or merger filings tagged in current batch.")
@@ -1046,6 +1225,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         with q_tab3:
             df_div = catalyst_df[catalyst_df["Catalyst Group"] == "Dividends & Buybacks"].sort_values(by="Catalyst Score", ascending=False)
             if not df_div.empty:
+                render_table_freshness_banner("Dividends & Buybacks Quadrant", "tab1_q_div")
                 st.dataframe(df_div[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
                 st.info("No active dividend or buyback filings tagged in current batch.")
@@ -1053,6 +1233,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         with q_tab4:
             df_splits = catalyst_df[catalyst_df["Catalyst Group"] == "Splits & Bonus"].sort_values(by="Catalyst Score", ascending=False)
             if not df_splits.empty:
+                render_table_freshness_banner("Splits & Bonus Quadrant", "tab1_q_splits")
                 st.dataframe(df_splits[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
                 st.info("No stock split or bonus declarations tagged in current batch.")
@@ -1063,6 +1244,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         st.caption("Sorted strictly by Catalyst Score (Highest Bullish to Lowest Bearish/Fade).")
         display_all = catalyst_df.sort_values(by="Catalyst Score", ascending=False).reset_index(drop=True)
         cols_master = ["Ticker", "Name", "CMP (₹)", "Catalyst Score", "1-2W Outlook", "P(1W) Drift %", "P(2W) Drift %", "Pre-RunUp 5D %", "Vol Surge Ratio", "Close in Range %", "Dist 200DMA %", "Active Catalyst"]
+        render_table_freshness_banner(f"Master NIFTY 100 Evaluated Matrix ({len(catalyst_df)} Assets)", "tab1_master_matrix")
         st.dataframe(
             display_all[cols_master].style.apply(apply_top3_bot3_styling, axis=None).format({
                 "CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%",
@@ -1083,6 +1265,7 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
 
 # VIEW 2: Stock Deep Dive with Vector RAG Insights & Filing Index Section
 elif nav_choice == "🔬 Single-Stock Deep Dive":
+    render_tab_refresh_bar("Tab 2: Single-Stock Deep Dive & Vector RAG", "tab2_top")
     st.subheader("🔬 Single-Stock Reaction & Vector RAG Disclosure Deep Dive")
     
     all_syms_raw = sorted([x["ticker"].replace(".NS", "") for x in ACTIVE_UNIVERSE])
@@ -1144,12 +1327,14 @@ elif nav_choice == "🔬 Single-Stock Deep Dive":
     if indexed_rows:
         indexed_df = pd.DataFrame(indexed_rows)
         st.markdown(f"**Total Indexed Filings Found Across Universe:** `{len(indexed_df)}`")
+        render_table_freshness_banner("Vector RAG Indexed Filings Table", "tab2_rag_index")
         st.dataframe(indexed_df, use_container_width=True, height=220)
     else:
         st.info("No raw textual filings currently active in the RAG index. RSS feeds are awaiting fresh exchange circulars.")
 
 # VIEW 3: Live Exchange Disclosures
 elif nav_choice == "📰 Exchange Disclosures & Media Feed":
+    render_tab_refresh_bar("Tab 3: Exchange Disclosures & Live RSS Media Feed", "tab3_top")
     st.subheader("📰 Authentic Exchange Disclosures & Regulatory Stream")
     st.markdown(f"Total Filings Parsed in Batch: **{len(news_items_list)}**")
 
@@ -1191,11 +1376,13 @@ elif nav_choice == "📰 Exchange Disclosures & Media Feed":
 
 # VIEW 4: Full Quantitative Handbook
 elif nav_choice == "📖 Quantitative Strategy Handbook":
+    render_tab_refresh_bar("Tab 6: Quantitative Strategy Handbook & Empirical Rules", "tab6_top")
     st.title("📖 Quantitative Strategy Handbook & Indicator Playbook")
     st.markdown("This institutional handbook explains the mathematical formulation and AI RAG logic of **Catalyst Pulse Pro**.")
 
 # VIEW 5: Paper Prediction Audit & Win Rate Ledger
 elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
+    render_tab_refresh_bar("Tab 4: Paper Prediction Audit, Portfolio & Multi-Horizon Analytics", "tab4_top")
     st.subheader("📊 Self-Auditing Paper Prediction Ledger & Win Rate")
     st.caption("Auto-synced to GitHub Repository. Real-time IST timestamps, directional PnL, dynamic horizons, market regime tracking & test run management.")
 
@@ -1524,6 +1711,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     styler_out = styler_out.map(color_wr_cell, subset=["Win Rate %"]).map(color_pnl_cell, subset=["Realized PnL (₹)", "Avg Return %"])
                 else:
                     styler_out = styler_out.applymap(color_wr_cell, subset=["Win Rate %"]).applymap(color_pnl_cell, subset=["Realized PnL (₹)", "Avg Return %"])
+                latest_ledger_dt_str = str(display_ledger["Date"].iloc[-1]) if not display_ledger.empty else ""
+                render_table_freshness_banner("Setup Direction Breakdown Table", latest_ledger_dt_str, "tab4_cat_out")
                 st.dataframe(styler_out, use_container_width=True)
 
             with cat_tab2:
@@ -1592,6 +1781,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     styler_arch = styler_arch.map(color_wr_cell, subset=["Win Rate %"]).map(color_pnl_cell, subset=["Realized PnL (₹)", "Avg Return %"])
                 else:
                     styler_arch = styler_arch.applymap(color_wr_cell, subset=["Win Rate %"]).applymap(color_pnl_cell, subset=["Realized PnL (₹)", "Avg Return %"])
+                latest_ledger_dt_str = str(display_ledger["Date"].iloc[-1]) if not display_ledger.empty else ""
+                render_table_freshness_banner("Catalyst Archetype Breakdown Table", latest_ledger_dt_str, "tab4_cat_arch")
                 st.dataframe(styler_arch, use_container_width=True)
 
         # SECTION D: Deep Portfolio Analytics, Mathematical Expectancy & Equity Curve
@@ -1684,6 +1875,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             else:
                 styler_horiz = styler_horiz.applymap(color_wr_cell, subset=wr_cols).applymap(color_pnl_cell, subset=ret_cols)
                 
+            render_table_freshness_banner("Multi-Horizon & Multi-Regime Prediction Performance Matrix (20Y)", datetime.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "tab4_horizon_matrix")
             st.dataframe(styler_horiz, use_container_width=True)
 
             # Interactive Horizon Inspector
@@ -1720,7 +1912,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         st.markdown("<div style='margin-top: 0.8rem;'></div>", unsafe_allow_html=True)
         st.markdown("##### 💼 Tactical Swing Portfolio Holdings (₹15,000 Sizing) & Holding Age Breakdown")
         
-        active_holdings_df = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
+        active_holdings_df = display_ledger[display_ledger["Outcome_Status"].isin(["PENDING", "OPEN"])].copy()
         if not active_holdings_df.empty:
             portfolio_summary_rows = []
             for _, h_row in active_holdings_df.iterrows():
@@ -1762,6 +1954,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                 })
 
             port_summary_df = pd.DataFrame(portfolio_summary_rows)
+            latest_active_dt = str(active_holdings_df["Date"].iloc[-1]) if not active_holdings_df.empty else ""
+            render_table_freshness_banner("Tactical Swing Portfolio Holdings (₹15,000 Tranche)", latest_active_dt, "tab4_swing_port")
             st.dataframe(
                 port_summary_df.style.format({
                     "Purchase Price (₹)": "₹{:.2f}",
@@ -1795,7 +1989,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
             filtered_ledger = filtered_ledger[filtered_ledger["Predicted_Outlook"] == "BEARISH_FADE"]
 
         if "PENDING" in status_f:
-            filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"] == "PENDING"]
+            filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"].isin(["PENDING", "OPEN"])]
         elif "Completed" in status_f:
             filtered_ledger = filtered_ledger[filtered_ledger["Outcome_Status"].isin(["SUCCESS", "FAILED"])]
 
@@ -1821,7 +2015,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         )
         display_ledger["Entry Catalyst Score"] = display_ledger["Catalyst_Score"].apply(lambda v: f"{float(v):+.1f}")
         display_ledger["Exit / Current Catalyst Score"] = display_ledger.apply(
-            lambda r: f"{float(live_score_lookup.get(str(r['Ticker']).replace('.NS', ''), r['Catalyst_Score'])):+.1f}" if r["Outcome_Status"] == "PENDING" else f"{float(r['Catalyst_Score']):+.1f}", axis=1
+            lambda r: f"{float(live_score_lookup.get(str(r['Ticker']).replace('.NS', ''), r['Catalyst_Score'])):+.1f}" if r["Outcome_Status"] in ["PENDING", "OPEN"] else f"{float(r['Catalyst_Score']):+.1f}", axis=1
         )
 
         def highlight_outcomes(df):
@@ -1850,6 +2044,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         ]
         existing_cols = [c for c in cols_display if c in filtered_ledger.columns]
 
+        latest_filt_dt = str(filtered_ledger["Date"].iloc[-1]) if not filtered_ledger.empty else ""
+        render_table_freshness_banner("Ledger Audit Trail (IST Real-Time Sync)", latest_filt_dt, "tab4_ledger_audit")
         st.dataframe(
             filtered_ledger[existing_cols].style.apply(highlight_outcomes, axis=None).format({
                 "CMP_At_Prediction": "₹{:.2f}",
@@ -1935,6 +2131,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     )
                 return styles
 
+            latest_closed_dt = str(journal_df["Timestamp"].iloc[0]) if not journal_df.empty else ""
+            render_table_freshness_banner("Daily Purchase & Sale Execution Journal (Closed Positions)", latest_closed_dt, "tab4_closed_journal")
             st.dataframe(
                 journal_df.style.apply(style_journal, axis=None).format({
                     "Approx. Amount (₹)": "₹{:,.2f}",
@@ -1955,7 +2153,7 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
         st.markdown("##### 📅 Daily Purchase & Sale Execution Journal (Open Positions Only)")
         st.caption("Chronological record tracking active open holdings currently pending square-off, including analytical trade rationale.")
 
-        open_ledger_df = display_ledger[display_ledger["Outcome_Status"] == "PENDING"].copy()
+        open_ledger_df = display_ledger[display_ledger["Outcome_Status"].isin(["PENDING", "OPEN"])].copy()
 
         if not open_ledger_df.empty:
             open_rows = []
@@ -2003,6 +2201,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
                     )
                 return styles
 
+            latest_open_dt = str(open_df["Timestamp"].iloc[0]) if not open_df.empty else ""
+            render_table_freshness_banner("Daily Purchase & Sale Execution Journal (Open Positions Only)", latest_open_dt, "tab4_open_journal")
             st.dataframe(
                 open_df.style.apply(style_open, axis=None).format({
                     "Approx. Amount (₹)": "₹{:,.2f}",
@@ -2021,6 +2221,8 @@ elif nav_choice == "📊 Paper Prediction Audit & Win Rate":
 # VIEW 6: AI-Powered Deep-Value & Contrarian Dual-Logic Bear-Market Engine (v4.2-Production)
 elif nav_choice == "⚡ Dual-Logic Bear-Market Engine (v4.2)":
     from dual_logic_ui import render_tab1_section6_bear_market_recommendations, render_dual_logic_studio
+
+    render_tab_refresh_bar("Tab 5: Dual-Logic Bear-Market Engine & Backtest Studio", "tab5_top")
 
     st.markdown("### ⚡ AI-Powered Deep-Value & Contrarian Investment Architecture")
     st.caption("Dual-Logic Out-of-Sample Engine (v4.2-Production) • 2006–2026 Stress Horizon • Bear-Market Resilience (>= 10% CAGR) • Energy Grids & Physical Moats")
