@@ -18,3 +18,7 @@
 2026-10-15 15:08:17,723 [INFO] DualLogicEngine_v4.2: Loaded locked production engine state from dual_logic_findings.json.
 2026-10-15 15:10:14,696 [INFO] DataPipeline20Y: Loaded existing 20Y dataset from C:\Users\epurntr\Downloads\Gravity\catalyst-pulse-pro\data\dual_logic_20y_dataset.csv (724 records).
 2026-10-15 15:10:14,908 [INFO] DualLogicEngine_v4.2: Loaded locked production engine state from dual_logic_findings.json.
+2026-10-17 13:48:00,088 [INFO] DataPipeline20Y: Loaded existing v5.0 20Y dataset from C:\Users\epurntr\Downloads\Gravity\catalyst-pulse-pro\data\dual_logic_20y_dataset.csv (810 records).
+2026-10-17 13:48:00,389 [INFO] DualLogicEngine_v5.0: Loaded locked production engine state from dual_logic_findings.json.
+2026-10-17 13:49:28,659 [INFO] DataPipeline20Y: Loaded existing v5.0 20Y dataset from C:\Users\epurntr\Downloads\Gravity\catalyst-pulse-pro\data\dual_logic_20y_dataset.csv (810 records).
+2026-10-17 13:49:28,847 [INFO] DualLogicEngine_v5.0: Loaded locked production engine state from dual_logic_findings.json.

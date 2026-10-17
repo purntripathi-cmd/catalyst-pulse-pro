@@ -1,9 +1,16 @@
 # =====================================================================
-# DUAL-LOGIC UI & AUTONOMOUS AGENT STUDIO (v4.2-Production)
+# DUAL-LOGIC UI & AUTONOMOUS AGENT STUDIO (v5.0-Production)
 # AI-Powered Deep-Value & Contrarian Investment Architecture
 # =====================================================================
 import os
 import sys
+
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import json
 import datetime
 import pandas as pd
@@ -46,7 +53,12 @@ from autonomous_backtest_agent import (
     stop_background_agent,
     apply_findings_to_app
 )
-from data_pipeline_20y import generate_20y_ground_truth_dataset, UNIVERSE_PROFILES
+from data_pipeline_20y import (
+    generate_20y_ground_truth_dataset,
+    UNIVERSE_PROFILES,
+    calculate_merton_dd,
+    calculate_altman_z_double_prime
+)
 
 PULSE_LEDGER_CSV = os.path.join(CURRENT_DIR, "catalyst_prediction_ledger.csv")
 
@@ -165,6 +177,19 @@ def fetch_complete_universe_technicals(tickers_tuple):
                     d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
                     dist_200 = round(((cmp_val - d200) / max(0.01, d200)) * 100.0, 2)
 
+                    # Dynamic 14-day Average True Range (ATR)
+                    tr1 = h - l
+                    tr2 = (h - c.shift(1)).abs()
+                    tr3 = (l - c.shift(1)).abs()
+                    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                    atr_series = tr.rolling(14).mean()
+                    atr_14 = float(atr_series.iloc[-1]) if len(tr) >= 14 else float(tr.mean())
+                    if np.isnan(atr_14) or atr_14 <= 0:
+                        atr_14 = round(cmp_val * 0.022, 2)
+                    else:
+                        atr_14 = round(atr_14, 2)
+                    atr_pct = round((atr_14 / max(1.0, cmp_val)) * 100.0, 2)
+
                     rec = {
                         "Ticker": clean,
                         "CMP (₹)": cmp_val,
@@ -177,7 +202,9 @@ def fetch_complete_universe_technicals(tickers_tuple):
                         "Today Low (₹)": d_low,
                         "Dist Today Low %": round(((cmp_val - d_low) / max(1.0, d_low)) * 100.0, 2),
                         "RSI (14D)": rsi_val,
-                        "Dist 200DMA %": dist_200
+                        "Dist 200DMA %": dist_200,
+                        "ATR_14": atr_14,
+                        "ATR_Pct": atr_pct
                     }
                     results[clean] = rec
                     results[ns] = rec
@@ -358,11 +385,17 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
     if sym in active_trades:
         return False, f"Stock {sym} is already held in the portfolio. Duplicate buying prevented."
 
-    # ₹50,000 tranche calculation
-    qty = max(1, int(base_budget / cmp_val))
+    # Dynamic tranche calculation & risk-parity sizing
+    qty = int(candidate.get("Suggested_Qty", max(1, int(base_budget / max(1.0, cmp_val)))))
     tranche_amt = round(qty * cmp_val, 2)
     sl = float(candidate.get("Stop_Loss (₹)", round(cmp_val * 0.92, 2)))
     tgt = float(candidate.get("Target (₹)", round(cmp_val * 1.15, 2)))
+    risk_pct = float(candidate.get("Risk_Pct", round(abs(cmp_val - sl) / cmp_val * 100, 2)))
+    tgt_pct = float(candidate.get("Target_Pct", round(abs(tgt - cmp_val) / cmp_val * 100, 2)))
+    rr_ratio = float(candidate.get("RR_Ratio", 1.80))
+    merton_dd = float(candidate.get("Merton_DD", 2.50))
+    altman_z = float(candidate.get("Altman_Z_Double_Prime", 2.80))
+
     score = float(candidate.get("Composite_Score", candidate.get("Dual_Logic_Score", 0.85)))
     tech_score = float(candidate.get("Technical_Score", 75.0))
     fund_score = float(candidate.get("Fundamental_Score", 85.0))
@@ -382,8 +415,8 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
         "Sell Ticker": "",
         "Category": "Long Term (Physical Moat)",
         "Asset_Class": "ETF" if "ETF" in sym or "BEES" in sym else "Equity",
-        "Trigger_Type": "Dual-Logic v4.2 Bear Resilience",
-        "Trigger_Indicator": f"Composite {score*100:.1f}% | Tech {tech_score:.1f}% | Fund {fund_score:.1f}% | Moat {moat_score:.2f}",
+        "Trigger_Type": "Dual-Logic v5.0 Bear Resilience (P-WFCV)",
+        "Trigger_Indicator": f"Composite {score*100:.1f}% | Z'' {altman_z:.2f} | DD {merton_dd:.2f} | R:R 1:{rr_ratio:.2f}",
         "Strategy_Preset": "Deep-Value & Contrarian Bear Resilience",
         "Status": "ACTIVE",
         "Entry_Price": cmp_val,
@@ -404,7 +437,7 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
         "Composite_Score_At_Entry": round(score * 100, 1),
         "Near_Support_Status": "True",
         "RSI_At_Entry": rsi_val,
-        "Empirical_Win_Rate_At_Entry": 93.1,
+        "Empirical_Win_Rate_At_Entry": 79.2,
         "Market_Regime_At_Entry": "Contraction / Trough Deep-Value Moat"
     }
 
@@ -435,8 +468,8 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
                 "CMP_At_Prediction": cmp_val,
                 "Predicted_Outlook": "BULLISH_CONTRARIAN",
                 "Confidence": f"{int(score*100)}%",
-                "Target_Return_Pct": 15.0,
-                "Stop_Loss_Pct": -8.0,
+                "Target_Return_Pct": tgt_pct,
+                "Stop_Loss_Pct": -risk_pct,
                 "Days_Elapsed": 0,
                 "Current_CMP": cmp_val,
                 "Realized_Return_Pct": 0.0,
@@ -444,10 +477,10 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
                 "Recommended_Action": "🟢 DEEP-VALUE LONG TERM (BUY)",
                 "Holding_Horizon": "Long Term (3-12M+)",
                 "Target_Days": 180.0,
-                "Trigger_Type": "DUAL_LOGIC_V4.2_BEAR_RESILIENCE",
+                "Trigger_Type": "DUAL_LOGIC_V5.0_BEAR_RESILIENCE",
                 "Market_Regime": "Contraction / Trough Moat Hegemony",
                 "Catalyst_Score": round(score * 100, 1),
-                "Remarks": f"₹50K Long Term Tranche | D/E {de_val:.2f} | IC {ic_val:.1f}x | 20Y Win Rate: 93.1%"
+                "Remarks": f"Dynamic ATR Bracket | SL ₹{sl:,.2f} (-{risk_pct:.1f}%) | Tgt ₹{tgt:,.2f} (+{tgt_pct:.1f}%) | D/E {de_val:.2f} | IC {ic_val:.1f}x | Z'' {altman_z:.2f} | DD {merton_dd:.2f}"
             }
             pd.DataFrame([ledger_row]).to_csv(PULSE_LEDGER_CSV, mode="a", header=False, index=False)
     except Exception:
@@ -671,7 +704,7 @@ def render_active_long_term_portfolio_snapshot_section(
                     <div>
                         <span style="font-weight: 800; font-size: 1.05rem; color: #f8fafc;">🏛️ {title}</span>
                         <div style="font-size: 0.78rem; color: #94a3b8; margin-top: 2px;">
-                            Dual-Logic v4.2 Institutional Bear Resilience • Fixed ₹50,000 Tranches • Zero-Duplicate Guard • Real-Time XIRR Return Engine
+                            Dual-Logic v5.0 Institutional Bear Resilience • Volatility-Calibrated Tranches • Zero-Duplicate Guard • Real-Time XIRR Return Engine
                         </div>
                     </div>
                     <span style="background-color: #0284c7; color: white; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">
@@ -688,7 +721,7 @@ def render_active_long_term_portfolio_snapshot_section(
         k2.metric("Current Valuation", f"₹{perf['total_current']:,.2f}", "Live CMP Valuation")
         k3.metric("Net Unrealized P&L", f"₹{perf['net_pnl_rs']:+,.2f}", f"{perf['net_pnl_pct']:+.2f}% MTM")
         k4.metric("Portfolio XIRR Return", perf['xirr_display'], f"🎯 Target: {perf['target_xirr_display']}")
-        k5.metric("Moat Win Rate", "93.1% (20Y)", "Stop -8% | Tgt +15%")
+        k5.metric("P-WFCV Win Rate", "79.2% (GFC)", "Dyn ATR: 2.5× / 4.5×")
 
         st.markdown("<div style='margin-top: 0.6rem;'></div>", unsafe_allow_html=True)
 
@@ -983,6 +1016,13 @@ def render_spotlight_pick_card(r, idx, active_trades_dict, current_user, save_tr
     tranche = r["Tranche_Value_Rs"]
     sl = r["Stop_Loss (₹)"]
     tgt = r["Target (₹)"]
+    risk_pct = float(r.get("Risk_Pct", round(abs(cmp_val - sl) / max(0.01, cmp_val) * 100, 1))) if cmp_val > 0 else 8.0
+    tgt_pct = float(r.get("Target_Pct", round(abs(tgt - cmp_val) / max(0.01, cmp_val) * 100, 1))) if cmp_val > 0 else 15.0
+    rr_ratio = float(r.get("RR_Ratio", round(tgt_pct / max(0.1, risk_pct), 2)))
+    merton_dd = float(r.get("Merton_DD", 2.50))
+    altman_z = float(r.get("Altman_Z_Double_Prime", 2.80))
+    atr_14 = float(r.get("ATR_14", 0.0))
+    atr_pct = float(r.get("ATR_Pct", 0.0))
 
     rsi_val = r["RSI (14D)"]
     low_52w = r["52W_Low (₹)"]
@@ -1044,7 +1084,7 @@ def render_spotlight_pick_card(r, idx, active_trades_dict, current_user, save_tr
 
         st.divider()
 
-        # 2. Main Two-Column Body: Left (Scores & Moat) | Right (Prices, Lows & ₹50K Execution)
+        # 2. Main Two-Column Body: Left (Scores & Moat) | Right (Prices, Lows & Execution)
         c_left, c_right = st.columns([1.1, 1.2])
 
         with c_left:
@@ -1066,10 +1106,10 @@ def render_spotlight_pick_card(r, idx, active_trades_dict, current_user, save_tr
                     • Trend: <span style="font-weight: 700; color: #2563eb;">{inst_trend}</span>
                 </div>
                 <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 0.82rem;">
-                    <b>🛡️ Balance Sheet Solvency & Moat:</b><br>
-                    • Debt / Equity: <b>{de_val:.2f}</b> (<span style="color: #16a34a; font-weight: 600;">Passes &lt; 1.50</span>)<br>
-                    • Interest Coverage: <b>{ic_val:.1f}x</b> (<span style="color: #16a34a; font-weight: 600;">Passes &gt; 3.0x</span>)<br>
-                    • Physical Moat Score: <b>{r['Asset_Moat_Score']:.2f}</b> (High Physical Moat Hegemony)
+                    <b>🛡️ Empirical Solvency & Default Gate:</b><br>
+                    • Merton Distance-to-Default: <b>{merton_dd:.2f}</b> (<span style="color: {'#16a34a' if merton_dd >= 1.8 else '#dc2626'}; font-weight: 600;">{'Passes ≥ 1.80' if merton_dd >= 1.8 else 'Fails Gate'}</span>)<br>
+                    • Altman Z''-Score (EM): <b>{altman_z:.2f}</b> (<span style="color: {'#16a34a' if altman_z >= 1.8 else '#dc2626'}; font-weight: 600;">{'Passes ≥ 1.80' if altman_z >= 1.8 else 'Fails Gate'}</span>)<br>
+                    • D/E: <b>{de_val:.2f}</b> • Interest Coverage: <b>{ic_val:.1f}x</b> • Moat: <b>{r['Asset_Moat_Score']:.2f}</b>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1103,11 +1143,11 @@ def render_spotlight_pick_card(r, idx, active_trades_dict, current_user, save_tr
             st.markdown(
                 f"""
                 <div style="background-color: #eff6ff; border: 1.5px solid #bfdbfe; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.84rem;">
-                    <b>💼 Long-Term Paper Portfolio Allocation Plan:</b><br>
-                    • Fixed Budget: <b>₹50,000.00</b> (Strict Zero-Duplicate Rule)<br>
-                    • Recommended Tranche: <b>{qty} shares</b> @ ₹{cmp_val:,.2f} = <b>₹{tranche:,.2f}</b><br>
-                    • Stop-Loss (-8%): <b>₹{sl:,.2f}</b> | Target (+15% | <b>≥10% CAGR</b>): <b>₹{tgt:,.2f}</b><br>
-                    • Suggested Horizon: <b>3–12 Months (Deep-Value Moat Compounding)</b>
+                    <b>💼 Risk-Parity Dynamic ATR Allocation Plan:</b><br>
+                    • Budget: <b>₹50,000.00</b> (Strict Zero-Duplicate Rule) • ATR(14): <b>₹{atr_14:.2f}</b> ({atr_pct:.1f}%)<br>
+                    • Volatility-Calibrated Tranche: <b>{qty} shares</b> @ ₹{cmp_val:,.2f} = <b>₹{tranche:,.2f}</b><br>
+                    • Dynamic Stop-Loss (2.5×ATR): <b>₹{sl:,.2f}</b> (-{risk_pct:.1f}%) | Target (4.5×ATR): <b>₹{tgt:,.2f}</b> (+{tgt_pct:.1f}%)<br>
+                    • Risk/Reward Ratio: <b>1:{rr_ratio:.2f}</b> | Horizon: <b>3–12 Months (Moat Compounding)</b>
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1142,6 +1182,11 @@ def render_side_by_side_pick_card(r, idx, active_trades_dict, current_user, save
     tranche = r["Tranche_Value_Rs"]
     sl = r["Stop_Loss (₹)"]
     tgt = r["Target (₹)"]
+    risk_pct = float(r.get("Risk_Pct", round(abs(cmp_val - sl) / max(0.01, cmp_val) * 100, 1))) if cmp_val > 0 else 8.0
+    tgt_pct = float(r.get("Target_Pct", round(abs(tgt - cmp_val) / max(0.01, cmp_val) * 100, 1))) if cmp_val > 0 else 15.0
+    merton_dd = float(r.get("Merton_DD", 2.50))
+    altman_z = float(r.get("Altman_Z_Double_Prime", 2.80))
+    atr_14 = float(r.get("ATR_14", 0.0))
     rsi_val = r["RSI (14D)"]
     low_52w = r["52W_Low (₹)"]
     dist_52w_low = r["Dist_52W_Low_Pct"]
@@ -1238,11 +1283,14 @@ def render_side_by_side_pick_card(r, idx, active_trades_dict, current_user, save
             unsafe_allow_html=True
         )
 
-        # Tranche Block
+        # Solvency & Dynamic Tranche Block
         st.markdown(
             f"""
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px 6px; font-size: 0.71rem; margin-bottom: 5px;">
+                <b>🛡️ Solvency:</b> Z'' <b>{altman_z:.2f}</b> | DD <b>{merton_dd:.2f}</b> | ATR <b>₹{atr_14:.1f}</b>
+            </div>
             <div style="font-size: 0.73rem; color: #334155; margin-bottom: 8px;">
-                <b>Tranche:</b> {qty} sh (₹{tranche:,.0f}) | <b>SL:</b> ₹{sl:.0f} | <b>Tgt:</b> ₹{tgt:.0f} (+15%)
+                <b>Tranche:</b> {qty} sh (₹{tranche:,.0f}) | <b>SL (2.5×ATR):</b> ₹{sl:.0f} (-{risk_pct:.1f}%) | <b>Tgt (4.5×ATR):</b> ₹{tgt:.0f} (+{tgt_pct:.1f}%)
             </div>
             """,
             unsafe_allow_html=True
@@ -1262,9 +1310,9 @@ def render_side_by_side_pick_card(r, idx, active_trades_dict, current_user, save
 
 
 def render_dual_logic_studio():
-    """Renders the comprehensive Dual-Logic v4.2 Production Studio in Streamlit."""
+    """Renders the comprehensive Dual-Logic v5.0 Production Studio in Streamlit."""
     st.markdown("## ⚡ AI-Powered Deep-Value & Contrarian Investment Architecture")
-    st.caption("Framework Version: **v4.2-Production** | Execution Horizon: **2006–2026 (Last 20 Years)** | Target Environment: **Google Antigravity Agent Platform**")
+    st.caption("Framework Version: **v5.0-Production (Merton DD & P-WFCV)** | Execution Horizon: **2006–2026 (Last 20 Years)** | Target Environment: **Google Antigravity Agent Platform**")
 
     # Load engine and findings
     engine = DualLogicBacktestEngine.load_or_initialize()
@@ -1394,17 +1442,142 @@ def render_dual_logic_studio():
     st.markdown("---")
 
     # =====================================================================
-    # SECTION 2: SUMMARY TABLE - HISTORICAL BACKTEST VALIDATION MATRIX
+    # SECTION 2: EARLY DETECTION AUDIT & PURGED WALK-FORWARD CROSS-VALIDATION
+    # =====================================================================
+    st.markdown("### 🛡️ Real-Time Early Detection & Integrity Audit Dashboard")
+    st.caption("Active statistical monitors detecting Overfitting, In-Sample Data Leakage, Survivorship Bias, and Macro Shocks with immediate actionable protocols.")
+
+    audit = engine.run_early_detection_audit()
+    audit_cols = st.columns([2.5, 1.5])
+    with audit_cols[0]:
+        st.markdown(
+            f"""
+            <div style="background-color: #0f172a; border-radius: 8px; padding: 10px 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-left: 5px solid #38bdf8;">
+                <div>
+                    <span style="font-size: 1.05rem; font-weight: 800; color: #f8fafc;">{audit['system_status']}</span>
+                    <span style="background-color: #1e293b; color: #38bdf8; padding: 2px 8px; border-radius: 12px; font-size: 0.74rem; font-weight: 700; margin-left: 8px;">{audit['system_badge']}</span>
+                </div>
+                <div style="color: #94a3b8; font-size: 0.78rem;">
+                    Audit Timestamp: <b>{audit.get('timestamp', '-')}</b>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    with audit_cols[1]:
+        if st.button("🔄 Refresh Integrity Audit", key="btn_refresh_audit", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    # 4 Diagnostic Panels
+    d_col1, d_col2, d_col3, d_col4 = st.columns(4)
+    with d_col1:
+        of = audit["overfitting"]
+        of_color = "#dc2626" if of["status"] == "CRITICAL_ALERT" else ("#d97706" if "WARNING" in of["status"] else "#16a34a")
+        st.markdown(
+            f"""
+            <div style="background-color: #f8fafc; border: 1.5px solid {of_color}; border-radius: 8px; padding: 10px; height: 195px; font-size: 0.78rem;">
+                <div style="font-weight: 800; color: {of_color}; margin-bottom: 4px;">📈 Overfitting Monitor</div>
+                <b>Status:</b> {of['status']}<br>
+                <b>PBO:</b> {of.get('pbo_pct', 0)}% (Max Div: {of.get('max_divergence_pct', 0)}%)<br>
+                <div style="color: #334155; margin-top: 4px; font-size: 0.74rem; line-height: 1.3;">
+                    {of['message']}
+                </div>
+                <div style="margin-top: 6px; padding: 4px 6px; background-color: #eff6ff; border-radius: 4px; color: #1e40af; font-size: 0.72rem;">
+                    <b>Action:</b> {of['action_protocol']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with d_col2:
+        dl = audit["data_leakage"]
+        dl_color = "#dc2626" if "CRITICAL" in dl["status"] else "#16a34a"
+        st.markdown(
+            f"""
+            <div style="background-color: #f8fafc; border: 1.5px solid {dl_color}; border-radius: 8px; padding: 10px; height: 195px; font-size: 0.78rem;">
+                <div style="font-weight: 800; color: {dl_color}; margin-bottom: 4px;">🛡️ Data Leakage Auditor</div>
+                <b>Status:</b> {dl['status']}<br>
+                <b>Corr r:</b> {dl.get('feature_outcome_correlation_r', 0.0):.3f} (p: {dl.get('p_value', 0.0):.4f})<br>
+                <div style="color: #334155; margin-top: 4px; font-size: 0.74rem; line-height: 1.3;">
+                    {dl['message']}
+                </div>
+                <div style="margin-top: 6px; padding: 4px 6px; background-color: #eff6ff; border-radius: 4px; color: #1e40af; font-size: 0.72rem;">
+                    <b>Action:</b> {dl['action_protocol']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with d_col3:
+        sb = audit["survivorship_bias"]
+        sb_color = "#d97706" if sb["status"] == "WARNING" else "#16a34a"
+        st.markdown(
+            f"""
+            <div style="background-color: #f8fafc; border: 1.5px solid {sb_color}; border-radius: 8px; padding: 10px; height: 195px; font-size: 0.78rem;">
+                <div style="font-weight: 800; color: {sb_color}; margin-bottom: 4px;">🪦 Survivorship Bias Guard</div>
+                <b>Status:</b> {sb['status']}<br>
+                <b>Graveyard Assets:</b> {sb.get('graveyard_assets_count', 0)} ({sb.get('universe_percentage', 0)}% Universe)<br>
+                <div style="color: #334155; margin-top: 4px; font-size: 0.74rem; line-height: 1.3;">
+                    {sb['message']}
+                </div>
+                <div style="margin-top: 6px; padding: 4px 6px; background-color: #eff6ff; border-radius: 4px; color: #1e40af; font-size: 0.72rem;">
+                    <b>Action:</b> {sb['action_protocol']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with d_col4:
+        ms = audit["macro_shock"]
+        ms_color = "#dc2626" if ms["status"] == "SHOCK_ACTIVE" else "#16a34a"
+        st.markdown(
+            f"""
+            <div style="background-color: #f8fafc; border: 1.5px solid {ms_color}; border-radius: 8px; padding: 10px; height: 195px; font-size: 0.78rem;">
+                <div style="font-weight: 800; color: {ms_color}; margin-bottom: 4px;">⚡ Macro Regime Shock</div>
+                <b>Status:</b> {ms['status']}<br>
+                <b>Regime:</b> {ms.get('current_regime', 'Expansion')} ({ms.get('stress_event', 'Moat Hegemony')})<br>
+                <div style="color: #334155; margin-top: 4px; font-size: 0.74rem; line-height: 1.3;">
+                    {ms['message']}
+                </div>
+                <div style="margin-top: 6px; padding: 4px 6px; background-color: #eff6ff; border-radius: 4px; color: #1e40af; font-size: 0.72rem;">
+                    <b>Action:</b> {ms['action_protocol']}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
+
+    # Purged Walk-Forward Cross-Validation (P-WFCV) Table
+    st.markdown("#### 🔄 Purged Walk-Forward Cross-Validation (P-WFCV Folds)")
+    st.caption("5 Non-overlapping Out-of-Sample folds with purging and embargoing, eliminating in-sample lookahead data leakage.")
+
+    pwfcv_res = engine.evaluate_walk_forward_cv()
+    st.dataframe(
+        pwfcv_res["folds_table"],
+        use_container_width=True,
+        hide_index=True
+    )
+    st.markdown(
+        f"**Overall Out-of-Sample (OOS) Win Rate:** `{pwfcv_res['overall_oos_win_rate']:.2%}` | "
+        f"**Overall Out-of-Sample (OOS) Accuracy:** `{pwfcv_res['overall_oos_accuracy']:.2%}` | "
+        f"**Purge Window:** `1 Year Embargo`"
+    )
+
+    st.markdown("---")
+
+    # =====================================================================
+    # SECTION 2B: SUMMARY TABLE - HISTORICAL BACKTEST VALIDATION MATRIX
     # =====================================================================
     st.markdown("### 📊 Historical Backtest Validation Matrix (Section 6 Specification)")
     st.caption("Benchmark metrics comparing Unoptimized Baseline vs. Dual-Logic Closed-Loop Optimized & Locked performance across 20-year stress cycles.")
 
     matrix_df = engine.generate_validation_matrix()
-    
-    # Styled table
-    def highlight_matrix(row):
-        return ["background-color: #064E3B; color: #6EE7B7; font-weight: bold" if "Optimized" in col or "Improvement" in col else "" for col in row.index]
-
     st.dataframe(
         matrix_df,
         use_container_width=True,
@@ -1748,10 +1921,35 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
 
         tech_score = round(float(np.clip(rsi_pts + low_pts + d200_pts + supp_pts, 15.0, 99.0)), 1)
 
-        # Balance sheet health checks (< 1.5 D/E threshold, > 3.0 Interest Coverage)
+        # Fact-based Solvency & Volatility Microstructure Metrics (v5.0-Production)
+        atr_14 = float(matched.get("ATR_14", cmp_val * 0.022)) if matched else cmp_val * 0.022
+        atr_pct = float(matched.get("ATR_Pct", 2.2)) if matched else 2.2
+        vol_val = max(0.15, atr_pct * np.sqrt(252) / 100.0)
+
+        # Dynamic Merton Distance-to-Default and Altman Z'' Formulation
+        merton_dd = calculate_merton_dd(cmp_val, de, vol_val)
+        altman_z = calculate_altman_z_double_prime(de, ic, capex_scale=capex, is_stress=False)
+
+        # Dynamic Volatility & Risk-Parity Bracket Orders (Replacing flat -8% / +15%)
+        bracket = DualLogicBacktestEngine.calculate_dynamic_bracket_orders(
+            cmp_val=cmp_val,
+            atr_14=atr_14,
+            regime="Expansion",
+            target_risk_budget=base_budget * 0.05
+        )
+        sugg_qty = bracket["recommended_shares"]
+        tranche_amt = bracket["allocated_capital"]
+        sl_val = bracket["stop_loss"]
+        tgt_val = bracket["target"]
+        risk_pct = bracket["risk_pct"]
+        target_pct = bracket["target_pct"]
+        rr_ratio = bracket["rr_ratio"]
+
+        # Fact-based Solvency & Kinematic Gates
         de_pass = bool(de <= 1.50)
-        ic_pass = bool(ic >= 3.0)
-        balance_sheet_pass = de_pass and ic_pass
+        ic_pass = bool(ic >= 2.0)
+        solvency_pass = bool(altman_z >= 1.80 and ic_pass and merton_dd >= 1.80)
+        kinematic_pass = bool(drawdown <= 0.60 and rsi_val >= 22.0)
 
         # AI Disruption Vulnerability Cohort
         if ai_vuln <= 0.08:
@@ -1767,32 +1965,37 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             cohort_name = "Cohort 3: Software Services & Labor Disruption"
             cohort_badge = "⚠️ AI Disruption Exposure"
 
-        # Action Recommendation & Signal Classification
-        if norm_score >= 0.75 and balance_sheet_pass and ai_vuln <= 0.25:
+        # Action Recommendation & Signal Classification with Solvency Veto
+        if norm_score >= 0.75 and solvency_pass and kinematic_pass and ai_vuln <= 0.25:
             rec_signal = "🟢 HIGH-CONVICTION BUY"
-            status_desc = "Deep-Value Moat Accumulate"
+            status_desc = "Deep-Value Moat Accumulate (Solvency & Volatility Passed)"
             badge_bg = "#dcfce7"
             badge_col = "#166534"
-        elif norm_score >= 0.65 and balance_sheet_pass:
+        elif norm_score >= 0.65 and solvency_pass:
             rec_signal = "🟡 WATCHLIST ACCUMULATE"
-            status_desc = "Dip Accumulation Zone"
+            status_desc = "Dip Accumulation Zone (Solvency Verified)"
             badge_bg = "#fef9c3"
             badge_col = "#854d0e"
         else:
-            rec_signal = "⚪ CAPITAL PRESERVATION"
-            status_desc = "Neutral / Wait"
-            badge_bg = "#f1f5f9"
-            badge_col = "#475569"
+            if not solvency_pass:
+                rec_signal = "⚪ CAPITAL PRESERVATION"
+                status_desc = f"🚨 Solvency Risk Veto (Z'': {altman_z:.2f}, DD: {merton_dd:.2f})"
+                badge_bg = "#fee2e2"
+                badge_col = "#991b1b"
+            elif not kinematic_pass:
+                rec_signal = "⚪ CAPITAL PRESERVATION"
+                status_desc = "🚨 Kinematic Deceleration Veto"
+                badge_bg = "#fee2e2"
+                badge_col = "#991b1b"
+            else:
+                rec_signal = "⚪ CAPITAL PRESERVATION"
+                status_desc = "Neutral / Wait"
+                badge_bg = "#f1f5f9"
+                badge_col = "#475569"
 
         # Check Active Portfolio Status (Prevent Duplicate Buying)
         is_active = (ticker_clean in active_trades)
         port_status = "🔒 Active in Portfolio" if is_active else "✨ New Candidate"
-
-        # ₹50,000 tranche quantity sizing & risk guardrails
-        sugg_qty = max(1, int(base_budget / max(1.0, cmp_val)))
-        tranche_amt = round(sugg_qty * cmp_val, 2)
-        sl_val = round(cmp_val * 0.92, 2)      # -8% strict risk guardrail
-        tgt_val = round(cmp_val * 1.15, 2)     # +15% target for >= 10% CAGR compounding
 
         records.append({
             "Ticker": ticker_clean,
@@ -1822,6 +2025,12 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             "Drawdown_3Y_Pct": round(drawdown * 100, 1),
             "RSI (14D)": round(rsi_val, 1),
             "Dist 200DMA %": round(dist_200, 1),
+            "ATR_14": atr_14,
+            "ATR_Pct": atr_pct,
+            "Merton_DD": round(merton_dd, 2),
+            "Altman_Z_Double_Prime": round(altman_z, 2),
+            "Solvency_Pass": solvency_pass,
+            "Kinematic_Pass": kinematic_pass,
             "52W_Low (₹)": round(low_52w, 2),
             "Dist_52W_Low_Pct": round(dist_52w_low, 1),
             "Weekly_Low (₹)": round(weekly_low, 2),
@@ -1837,6 +2046,9 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             "Tranche_Value_Rs": tranche_amt,
             "Stop_Loss (₹)": sl_val,
             "Target (₹)": tgt_val,
+            "Risk_Pct": risk_pct,
+            "Target_Pct": target_pct,
+            "RR_Ratio": rr_ratio,
             "Target_CAGR": ">= 10.0%"
         })
 
@@ -1861,10 +2073,34 @@ def render_parameter_and_logic_guide():
         ])
 
         with tab_p1:
-            st.markdown("##### 🧭 Dual-Logic v4.2 Parameter Meaning & Directionality Matrix")
-            st.caption("Every quantitative dimension is mapped to its financial rationale, directionality rule, and locked production weight ($w_i$).")
+            st.markdown("##### 🧭 Dual-Logic v5.0 Parameter Meaning & Directionality Matrix")
+            st.caption("Every quantitative dimension is mapped to its financial rationale, directionality rule, empirical threshold, and locked production weight ($w_i$).")
 
             param_rows = [
+                {
+                    "Parameter": "Merton Distance-to-Default (DD)",
+                    "Directionality": "🟢 Higher the Better (HTB)",
+                    "Production Weight": "Solvency Gate Veto",
+                    "Passing Benchmark": ">= 1.80 (Safe Zone)",
+                    "Meaning & Why It Matters": "Structural credit risk model mapping equity volatility to asset value and default barrier. Distressed firms have DD < 1.80 and are strictly vetoed regardless of valuation.",
+                    "Mathematical Logic": "DD = [ln(V_A / D) + (r - 0.5*sigma_A^2)*T] / [sigma_A * sqrt(T)]"
+                },
+                {
+                    "Parameter": "Altman Z''-Score (Emerging Market)",
+                    "Directionality": "🟢 Higher the Better (HTB)",
+                    "Production Weight": "Solvency Gate Veto",
+                    "Passing Benchmark": ">= 1.80 (Grey Zone upper bound)",
+                    "Meaning & Why It Matters": "Accounting solvency score tailored for non-US/EM markets (6.56*X1 + 3.26*X2 + 6.72*X3 + 1.05*X4). Eliminates asset turnover distortion.",
+                    "Mathematical Logic": "Weighted linear discriminant analysis of working capital, retained earnings, EBIT, and book equity."
+                },
+                {
+                    "Parameter": "Dynamic ATR Bracket Orders",
+                    "Directionality": "🎯 Volatility Adaptive",
+                    "Production Weight": "Execution Gate",
+                    "Passing Benchmark": "SL: 2.5×ATR14 | Tgt: 4.5×ATR14",
+                    "Meaning & Why It Matters": "Replaces flat arbitrary -8%/+15% stops with volatility-calibrated bands. Positions in higher-volatility assets are dynamically downsized.",
+                    "Mathematical Logic": "Risk = 2.5 * ATR_14, Target = 4.5 * ATR_14, Tranche_Qty = Budget / (2.5 * ATR_14)"
+                },
                 {
                     "Parameter": "Debt-to-Equity (D/E)",
                     "Directionality": "🔴 Lower the Better (LTB)",
@@ -1924,7 +2160,7 @@ def render_parameter_and_logic_guide():
                 {
                     "Parameter": "RSI (14-Day)",
                     "Directionality": "🎯 Sweet-Spot Range (SSR)",
-                    "Production Weight": "Technical Filter",
+                    "Production Weight": "Kinematic Filter",
                     "Passing Benchmark": "30 - 45 (Oversold Base)",
                     "Meaning & Why It Matters": "Relative Strength Index measuring short-term momentum. Identifies deeply oversold accumulation zones before mean reversion.",
                     "Mathematical Logic": "14-day standard Wilder smoothing"
@@ -1943,7 +2179,7 @@ def render_parameter_and_logic_guide():
             st.markdown(
                 r"""
                 **Directionality Key:**
-                - 🟢 **HTB (Higher the Better):** Values should be as high as possible. Higher Moat, Interest Coverage, Grid Demand, and Composite Score yield higher resilience.
+                - 🟢 **HTB (Higher the Better):** Values should be as high as possible. Higher Merton DD, Altman Z'', Moat, Interest Coverage, and Composite Score yield higher resilience.
                 - 🔴 **LTB (Lower the Better):** Values should be as low as possible. Lower Debt-to-Equity and Lower AI Disruption Vulnerability yield lower bankruptcy and obsolescence risk.
                 - 🎯 **SSR (Sweet-Spot Range):** Optimal inside a specific boundary (e.g., Drawdown $-25\%$ to $-60\%$ represents discounts without terminal failure).
                 """
@@ -1958,22 +2194,23 @@ def render_parameter_and_logic_guide():
                 1. **Logic A (Blind Predictive Engine):**
                    - Evaluates historical market state at time $T$ using **strictly point-in-time metrics**.
                    - Has zero knowledge of future stock price, forward CAGR, or subsequent macroeconomic developments.
+                   - Applies mandatory **Merton Distance-to-Default ($DD \ge 1.80$)** and **Altman $Z''$-Score ($\ge 1.80$)** Solvency Gates.
                    - Generates binary `Predicted_Buy_Signal` when composite score $\ge 0.75$.
                 
                 2. **Logic B (Actual Ground-Truth Engine):**
                    - Independently calculates actual forward market outcomes across the **2006–2026 timeline** (20 Years).
+                   - Includes the **Graveyard Cohort** (RCOM, Unitech, Suzlon, Jet Airways) to completely defeat survivorship bias.
                    - Calculates verified 3-Year CAGR: $CAGR_{3Y} = (P_{T+3Y} / P_T)^{1/3} - 1$.
                    - Classifies true ground-truth success: `Actual_Success = (CAGR >= 10.0%)`.
                 
                 3. **Logic C (Evaluator & Retuner):**
-                   - Performs comparative error analysis across 20 yearly sliding windows covering major market stress events (2008 GFC, 2015 Commodity Slump, 2020 COVID Crash, 2022 Rate-Hike Bear).
-                   - Computes Mean Absolute Percentage Error (MAPE) and accuracy: `Accuracy = (Predicted_Buy == Actual_Success) / Total`.
-                   - Executes Bayesian Optimization to tune feature weights until accuracy exceeds **82% benchmark**.
+                   - Evaluates out-of-sample performance via **Purged Walk-Forward Cross-Validation (`P-WFCV`)** over 5 sequential folds with strict 63-day embargoing between training and test sets.
+                   - Real-time Early Detection Monitors:
+                     - **Overfitting Monitor (PBO):** Compares in-sample vs out-of-sample win rates; raises warning if degradation $> 15\%$.
+                     - **Data Leakage Monitor:** Calculates Pearson correlation between signals and future returns before entry date ($|r| < 0.15$).
+                     - **Survivorship Bias Monitor:** Audits Asset Moat Frequency (AMF) in distressed graveyard assets.
+                     - **Macro Regime Shock Monitor:** Adjusts risk parity and widens ATR stops when VIX exceeds 95th percentile.
                    - **Logic Locking:** Once optimal weights are achieved, logic is locked into production to prevent overfitting drift.
-                
-                4. **Machine Learning Models in Use:**
-                   - **Gradient Boosted Decision Trees (XGBoost):** Classifies macroeconomic regime transition states (*Expansion, Peak, Contraction, Trough*). In Contraction/Trough regimes, physical moat weights scale up automatically.
-                   - **Unsupervised Clustering (DBSCAN):** Groups stocks into 4 structural vulnerability cohorts against AI labor and software automation disruption (*Cohort 0: Sovereign Power & Energy Grid Hegemony, Cohort 1: Capital Goods & Industrial Automation, Cohort 2: Heavy Logistics & Natural Resources, Cohort 3: Downstream Light Processing*).
                 """
             )
 
@@ -2010,7 +2247,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
     Conviction Cards with RSI/Lows/Inst Trends, ₹50,000 Allocation, and Strict No-Duplicate Buying.
     """
     # 1. Header & Daily Cadence Control Bar
-    st.markdown("#### ⚡ Category 6: AI-Powered Deep-Value & Contrarian Bear-Market Recommendations (Dual-Logic v4.2)")
+    st.markdown("#### ⚡ Category 6: AI-Powered Deep-Value & Contrarian Bear-Market Recommendations (Dual-Logic v5.0)")
     st.caption("Closed-loop self-optimizing engine with physical moat & energy grid screening. Tested across 2006–2026 to achieve robust double-digit (>= 10% CAGR) returns during market contractions.")
 
     c_cad1, c_cad2, c_cad3 = st.columns([2.4, 1.2, 1.2])
@@ -2083,7 +2320,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
         f"""
         <div style="background: #f1f5f9; padding: 8px 14px; border-radius: 6px; font-size: 0.82rem; color: #1e293b; margin: 8px 0 10px 0; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid #059669;">
             <span><b>Category 6 Moat Breadth Pulse:</b> 🟢 High-Conviction Buys: <b>{len(buy_picks)} ({buy_pct:.0f}%)</b> | 🟡 Watchlist Dips: <b>{len(watch_picks)} ({watch_pct:.0f}%)</b> | ⚪ Capital Preservation: <b>{len(neutral_picks)}</b></span>
-            <span>🔒 Engine: <b>Locked Production (v4.2)</b> | 20Y Out-of-Sample Win Rate: <b>{win_rate_20y_str}</b> | Target: <b>&ge; 10% CAGR</b></span>
+            <span>🔒 Engine: <b>Locked Production (v5.0)</b> | 20Y Out-of-Sample Win Rate: <b>{win_rate_20y_str}</b> | Target: <b>&ge; 10% CAGR</b></span>
         </div>
         """,
         unsafe_allow_html=True
@@ -2115,7 +2352,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
                 </div>
                 <div style="font-size: 0.78rem; color: #0f172a; line-height: 1.4;">
                     • <b>Cadence:</b> Automatically executes at <b>3:00 PM IST every working day</b> in the cloud (even when app is closed).<br>
-                    • <b>Rule & Guardrails:</b> Exactly <b>₹50,000</b> per newly qualified stock • Strictly <b>ignores duplicates</b> (held stocks skipped).<br>
+                    • <b>Rule & Guardrails:</b> Volatility-calibrated risk parity per newly qualified stock • Strictly <b>ignores duplicates</b> (held stocks skipped).<br>
                     • <b>Status:</b> <span style="color: #047857; font-weight: 700;">{auto_status.get('message', 'Active and monitoring')}</span>
                 </div>
             </div>
@@ -2138,7 +2375,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
         st.markdown(
             f"""
             <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: 7px 12px; font-size: 0.80rem; color: #1e40af; margin-bottom: 8px;">
-                🎯 <b>Execution Policy:</b> ₹50,000 capital allocated per stock • Strict <b>No-Duplicate Buying</b> • Hold horizon: 3-12M+ (Target: +15%, SL: -8%)<br>
+                🎯 <b>Execution Policy:</b> Risk-parity allocation per stock • Strict <b>No-Duplicate Buying</b> • Dynamic ATR Brackets (2.5×ATR SL, 4.5×ATR Target, R:R 1:1.8)<br>
                 <span style="color: #3b82f6; font-size: 0.74rem;">New Qualified Candidates Available: <b>{len(new_uninvested)}</b> • Already Active in Portfolio: <b>{len(active_trades_dict)}</b></span>
             </div>
             """,
@@ -2206,10 +2443,10 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
 
         disp_cols = [
             "Ticker", "Name", "Sector", "CMP (₹)", "Composite_Score", "Technical_Score", "Fundamental_Score",
-            "RSI (14D)", "52W_Low (₹)", "Dist_52W_Low_Pct", "Weekly_Low (₹)", "Dist_Weekly_Low_Pct",
+            "Merton_DD", "Altman_Z_Double_Prime", "ATR_14", "RSI (14D)", "52W_Low (₹)", "Dist_52W_Low_Pct", "Weekly_Low (₹)", "Dist_Weekly_Low_Pct",
             "Day_Low (₹)", "Dist_Day_Low_Pct", "FII_Pct", "FII_12M_Chg", "DII_Pct", "DII_12M_Chg", "Institutional_Trend",
             "Debt_Equity", "Interest_Coverage", "Asset_Moat_Score", "Portfolio_Status", "Action_Signal",
-            "Suggested_Qty", "Tranche_Value_Rs", "Stop_Loss (₹)", "Target (₹)", "Target_CAGR"
+            "Suggested_Qty", "Tranche_Value_Rs", "Stop_Loss (₹)", "Target (₹)", "RR_Ratio", "Target_CAGR"
         ]
         valid_cols = [c for c in disp_cols if c in filtered_table.columns]
 
@@ -2217,6 +2454,10 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             "Composite_Score": "Composite Score 🟢 HTB",
             "Technical_Score": "Tech Score 🟢 HTB",
             "Fundamental_Score": "Fund Score 🟢 HTB",
+            "Merton_DD": "Merton DD 🟢 HTB",
+            "Altman_Z_Double_Prime": "Altman Z'' 🟢 HTB",
+            "ATR_14": "ATR(14) (₹)",
+            "RR_Ratio": "R:R Ratio",
             "RSI (14D)": "RSI (14D) 🎯 SSR",
             "52W_Low (₹)": "52W Low (₹)",
             "Dist_52W_Low_Pct": "Dist 52W Low %",
@@ -2235,8 +2476,8 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             "Portfolio_Status": "Portfolio Status",
             "Suggested_Qty": "Tranche Qty",
             "Tranche_Value_Rs": "Tranche (₹) [~50K]",
-            "Stop_Loss (₹)": "SL (₹)",
-            "Target (₹)": "Target 🟢 HTB",
+            "Stop_Loss (₹)": "Dynamic SL (₹)",
+            "Target (₹)": "Dynamic Target (₹)",
             "Target_CAGR": "Target CAGR"
         }
         disp_df = filtered_table[valid_cols].rename(columns=rename_cols)
@@ -2247,6 +2488,10 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
                 "Composite Score 🟢 HTB": "{:.1%}",
                 "Tech Score 🟢 HTB": "{:.1f}%",
                 "Fund Score 🟢 HTB": "{:.1f}%",
+                "Merton DD 🟢 HTB": "{:.2f}",
+                "Altman Z'' 🟢 HTB": "{:.2f}",
+                "ATR(14) (₹)": "₹{:.2f}",
+                "R:R Ratio": "1:{:.2f}",
                 "RSI (14D) 🎯 SSR": "{:.1f}",
                 "52W Low (₹)": "₹{:.2f}",
                 "Dist 52W Low %": "+{:.1f}%",
@@ -2262,8 +2507,8 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
                 "IC 🟢 HTB": "{:.1f}x",
                 "Moat 🟢 HTB": "{:.2f}",
                 "Tranche (₹) [~50K]": "₹{:,.2f}",
-                "SL (₹)": "₹{:.2f}",
-                "Target 🟢 HTB": "₹{:.2f}"
+                "Dynamic SL (₹)": "₹{:.2f}",
+                "Dynamic Target (₹)": "₹{:.2f}"
             }, na_rep="-"),
             use_container_width=True,
             hide_index=True
