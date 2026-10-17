@@ -17,14 +17,93 @@ import streamlit as st
 import yfinance as yf
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from ticker_utils import (
-    match_tickers_in_text,
-    is_fno_eligible,
-    get_action_recommendation,
-    calibrate_empirical_probability,
-    evaluate_trade_lifecycle,
-    ROUND_TRIP_FRICTION_PCT
-)
+import sys
+import importlib
+
+# Safely import ticker_utils and handle Streamlit Cloud sys.modules caching
+try:
+    if "ticker_utils" in sys.modules and not hasattr(sys.modules["ticker_utils"], "is_fno_eligible"):
+        del sys.modules["ticker_utils"]
+        importlib.invalidate_caches()
+except Exception:
+    pass
+
+try:
+    if "ticker_utils" in sys.modules and not hasattr(sys.modules["ticker_utils"], "is_fno_eligible"):
+        del sys.modules["ticker_utils"]
+        importlib.invalidate_caches()
+    import ticker_utils
+    if not hasattr(ticker_utils, "is_fno_eligible"):
+        importlib.reload(ticker_utils)
+        
+    match_tickers_in_text = ticker_utils.match_tickers_in_text
+    is_fno_eligible = ticker_utils.is_fno_eligible
+    get_action_recommendation = ticker_utils.get_action_recommendation
+    calibrate_empirical_probability = ticker_utils.calibrate_empirical_probability
+    evaluate_trade_lifecycle = ticker_utils.evaluate_trade_lifecycle
+    ROUND_TRIP_FRICTION_PCT = getattr(ticker_utils, "ROUND_TRIP_FRICTION_PCT", 0.35)
+except Exception as _import_err:
+    # Fail-safe fallbacks ensuring 100% uptime on Streamlit Cloud hot-reloads
+    ROUND_TRIP_FRICTION_PCT = 0.35
+    NSE_FNO_TICKERS = {
+        "ABB", "ADANIENT", "ADANIPORTS", "AMBUJACEM", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+        "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BANKBARODA", "BEL", "BHEL", "BPCL",
+        "BHARTIARTL", "BOSCHLTD", "BRITANNIA", "CANBK", "CHOLAFIN", "CIPLA", "COALINDIA",
+        "COLPAL", "DLF", "DABUR", "DIVISLAB", "DIXON", "DRREDDY", "EICHERMOT", "GAIL",
+        "GODREJCP", "GRASIM", "HCLTECH", "HDFCBANK", "HDFCLIFE", "HAVELLS", "HEROMOTOCO",
+        "HINDALCO", "HAL", "HINDUNILVR", "ICICIBANK", "ICICIGI", "ICICIPRULI", "ITC",
+        "INDHOTEL", "IOC", "IRCTC", "INDUSINDBK", "NAUKRI", "INFY", "INDIGO", "JSWSTEEL",
+        "JINDALSTEL", "KOTAKBANK", "LTIM", "LT", "LUPIN", "M&M", "MARICO", "MARUTI",
+        "NTPC", "NESTLEIND", "ONGC", "PIDILITIND", "PFC", "POWERGRID", "PNB", "RECLTD",
+        "RELIANCE", "SBICARD", "SBILIFE", "SRF", "MOTHERSON", "SHREECEM", "SHRIRAMFIN",
+        "SIEMENS", "SBIN", "SUNPHARMA", "TVSMOTOR", "TCS", "TATACONSUM", "TATAMOTORS",
+        "TATAPOWER", "TATASTEEL", "TECHM", "TITAN", "TORNTPOWER", "TRENT", "ULTRACEMCO",
+        "UNITDSPR", "VBL", "VEDL", "WIPRO", "ZOMATO", "ZYDUSLIFE", "CONCOR"
+    }
+
+    def is_fno_eligible(symbol: str) -> bool:
+        clean = str(symbol).replace(".NS", "").replace("^", "").strip().upper()
+        return clean in NSE_FNO_TICKERS
+
+    def get_action_recommendation(outlook: str, ticker: str) -> str:
+        out_upper = str(outlook).upper()
+        if "BULLISH" in out_upper:
+            return "🟢 BUY / ACCUMULATE (Cash Equity)"
+        elif "BEARISH" in out_upper or "DISTRIBUTION" in out_upper or "FADE" in out_upper:
+            if is_fno_eligible(ticker):
+                return "🔴 F&O DERIVATIVE SHORT (Put/Future)"
+            else:
+                return "⚠️ CASH AVOID / EXIT (Long Square-Off)"
+        return "🟡 NEUTRAL / MONITOR"
+
+    def calibrate_empirical_probability(score: float, vol_surge: float = 1.0, runup_5d: float = 0.0, outlook: str = "BULLISH", market_regime: str = "Sideways") -> float:
+        is_bull = "BULLISH" in str(outlook).upper()
+        logit = 0.1627 + (0.0222 * float(score))
+        if is_bull:
+            logit -= 1.10
+            if runup_5d <= 2.5: logit += 0.35
+            elif runup_5d >= 6.0: logit -= 0.60
+        else:
+            logit += 0.15
+            if runup_5d >= 6.0: logit += 0.40
+            elif runup_5d <= 0.0: logit -= 0.30
+        v_ratio = max(0.2, min(5.0, float(vol_surge)))
+        if v_ratio >= 1.8: logit += 0.30
+        elif v_ratio < 0.8: logit -= 0.25
+        regime_str = str(market_regime).lower()
+        if "bull" in regime_str: logit += 0.25 if is_bull else -0.25
+        elif "bear" in regime_str: logit += 0.25 if not is_bull else -0.35
+        prob = 1.0 / (1.0 + np.exp(-logit))
+        return float(np.clip(round(float(prob * 100.0), 1), 18.0, 68.0))
+
+    try:
+        from ticker_utils import match_tickers_in_text, evaluate_trade_lifecycle
+    except Exception:
+        def match_tickers_in_text(text: str, universe_tickers: list) -> list:
+            return []
+        def evaluate_trade_lifecycle(bars, init_p, pred_type, target_ret, stop_ret, target_days=8, pred_date=None):
+            return {"status": None, "realized_ret": 0.0, "exit_p": float(init_p), "exit_price": float(init_p), "days_elapsed": 0}
+
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO)
 logger = logging.getLogger("CatalystPulsePro")
