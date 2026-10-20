@@ -1194,8 +1194,191 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
         df_div_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Dividends & Buybacks"])
         df_splits_c = len(catalyst_df[catalyst_df["Catalyst Group"] == "Splits & Bonus"])
 
+        # -----------------------------------------------------------------
+        # Automated Demerger / Merger Swap vs. Open-Market Switch Engine
+        # -----------------------------------------------------------------
+        KNOWN_CORPORATE_SWAP_SCHEMES = [
+            {
+                "source_ticker": "RECLTD",
+                "target_ticker": "PFC",
+                "base_source_shares": 100.0,
+                "swap_target_shares": 88.0,
+                "scheme_label": "RECLTD → PFC Merger / Demerger Swap (88 PFC for 100 RECLTD)",
+            }
+        ]
+
+        def _extract_swap_opportunities(df_demerge_sub, full_cat_df, rss_items):
+            opportunities = []
+            seen_pairs = set()
+            demerge_syms = set(df_demerge_sub["Ticker"].astype(str).tolist()) if not df_demerge_sub.empty else set()
+
+            # 1. Check known schemes whenever either leg is tagged in Demergers & Mergers (or both are in universe)
+            for scheme in KNOWN_CORPORATE_SWAP_SCHEMES:
+                src_t = scheme["source_ticker"]
+                tgt_t = scheme["target_ticker"]
+                if (src_t in demerge_syms or tgt_t in demerge_syms) and (src_t, tgt_t) not in seen_pairs:
+                    src_rows = full_cat_df[full_cat_df["Ticker"] == src_t]
+                    tgt_rows = full_cat_df[full_cat_df["Ticker"] == tgt_t]
+                    if not src_rows.empty and not tgt_rows.empty:
+                        seen_pairs.add((src_t, tgt_t))
+                        opportunities.append({
+                            "source_ticker": src_t,
+                            "source_name": str(src_rows.iloc[0].get("Name", src_t)),
+                            "source_cmp": float(src_rows.iloc[0]["CMP (₹)"]),
+                            "target_ticker": tgt_t,
+                            "target_name": str(tgt_rows.iloc[0].get("Name", tgt_t)),
+                            "target_cmp": float(tgt_rows.iloc[0]["CMP (₹)"]),
+                            "base_source_shares": float(scheme["base_source_shares"]),
+                            "swap_target_shares": float(scheme["swap_target_shares"]),
+                            "scheme_label": scheme["scheme_label"],
+                        })
+
+            # 2. Scan RSS filings for dynamic swap ratio announcements ("X shares of B for every Y shares of A")
+            swap_regex = re.compile(
+                r"(\d+(?:\.\d+)?)\s*(?:equity\s+)?(?:shares?|stocks?)?\s*(?:of\s+)?[A-Za-z0-9&\.\s]{1,35}?(?:for\s+every|per)\s*(\d+(?:\.\d+)?)\s*(?:equity\s+)?(?:shares?|stocks?)",
+                re.IGNORECASE,
+            )
+            for item in (rss_items or []):
+                matched_list = item.get("matched", [])
+                if len(matched_list) >= 2:
+                    t1, t2 = matched_list[0], matched_list[1]
+                    if (t1, t2) in seen_pairs or (t2, t1) in seen_pairs:
+                        continue
+                    text_blob = f"{item.get('title', '')} {item.get('summary', '')}"
+                    m = swap_regex.search(text_blob)
+                    if m:
+                        try:
+                            tgt_sh = float(m.group(1))
+                            src_sh = float(m.group(2))
+                            if tgt_sh > 0 and src_sh > 0:
+                                r1 = full_cat_df[full_cat_df["Ticker"] == t2]
+                                r2 = full_cat_df[full_cat_df["Ticker"] == t1]
+                                if not r1.empty and not r2.empty:
+                                    seen_pairs.add((t2, t1))
+                                    opportunities.append({
+                                        "source_ticker": t2,
+                                        "source_name": str(r1.iloc[0].get("Name", t2)),
+                                        "source_cmp": float(r1.iloc[0]["CMP (₹)"]),
+                                        "target_ticker": t1,
+                                        "target_name": str(r2.iloc[0].get("Name", t1)),
+                                        "target_cmp": float(r2.iloc[0]["CMP (₹)"]),
+                                        "base_source_shares": src_sh,
+                                        "swap_target_shares": tgt_sh,
+                                        "scheme_label": f"{t2} → {t1} Announced Filing Swap ({tgt_sh:g} {t1} for {src_sh:g} {t2})",
+                                    })
+                        except Exception:
+                            pass
+            return opportunities
+
+        def _compute_switch_comparison(opp, custom_base_shares=None, custom_swap_shares=None):
+            src_t = opp["source_ticker"]
+            src_name = opp["source_name"]
+            src_cmp = float(opp["source_cmp"])
+            tgt_t = opp["target_ticker"]
+            tgt_name = opp["target_name"]
+            tgt_cmp = float(opp["target_cmp"])
+
+            base_sh = float(custom_base_shares if custom_base_shares is not None else opp["base_source_shares"])
+            swap_sh = float(custom_swap_shares if custom_swap_shares is not None else opp["swap_target_shares"])
+            if base_sh <= 0:
+                base_sh = 100.0
+            if swap_sh <= 0 or tgt_cmp <= 0:
+                swap_sh = max(1.0, swap_sh)
+                tgt_cmp = max(0.01, tgt_cmp)
+
+            sale_proceeds = base_sh * src_cmp
+            demerger_val = swap_sh * tgt_cmp
+            mkt_shares_frac = sale_proceeds / tgt_cmp
+            mkt_ratio_per_100 = (mkt_shares_frac / base_sh) * 100.0
+            demerger_ratio_per_100 = (swap_sh / base_sh) * 100.0
+            extra_shares = mkt_shares_frac - swap_sh
+            improvement_pct = ((mkt_shares_frac - swap_sh) / swap_sh) * 100.0
+            val_advantage_rs = sale_proceeds - demerger_val
+            whole_shares = int(np.floor(mkt_shares_frac + 1e-9))
+            cash_left_rs = sale_proceeds - (whole_shares * tgt_cmp)
+
+            friction_cost_rs = sale_proceeds * (ROUND_TRIP_FRICTION_PCT / 100.0)
+            net_val_advantage_rs = val_advantage_rs - friction_cost_rs
+            net_improvement_pct = improvement_pct - ROUND_TRIP_FRICTION_PCT
+
+            if improvement_pct > 0.50:
+                verdict_code = "SWITCH_AT_MARKET"
+                verdict_badge = f"🟢 BETTER TO SWITCH AT MARKET RATE (Sell {src_t} → Buy {tgt_t})"
+                verdict_color = "#15803d"
+                verdict_bg = "#f0fdf4"
+                verdict_border = "#16a34a"
+                verdict_summary = (
+                    f"Selling <b>{base_sh:g} {src_t}</b> at market (₹{src_cmp:,.2f} = <b>₹{sale_proceeds:,.2f}</b>) buys "
+                    f"<b>{mkt_shares_frac:.2f} {tgt_t} shares</b> ({whole_shares} whole shares + ₹{cash_left_rs:,.2f} cash) vs. "
+                    f"<b>{swap_sh:g} {tgt_t} shares</b> (₹{demerger_val:,.2f}) in the demerger/merger. "
+                    f"You gain <b>+{extra_shares:.2f} extra {tgt_t} shares (+{improvement_pct:.2f}% / +₹{val_advantage_rs:,.2f} gross, +₹{net_val_advantage_rs:,.2f} net of 0.35% friction)</b> by switching at market now."
+                )
+            elif improvement_pct < -0.35:
+                verdict_code = "WAIT_FOR_DEMERGER"
+                verdict_badge = f"🔵 WAIT FOR DEMERGER / MERGER ENTITLEMENT (Hold {src_t} for {swap_sh:g} {tgt_t})"
+                verdict_color = "#1d4ed8"
+                verdict_bg = "#eff6ff"
+                verdict_border = "#2563eb"
+                verdict_summary = (
+                    f"The official demerger/merger swap gives <b>{swap_sh:g} {tgt_t} shares</b> (₹{demerger_val:,.2f}) per {base_sh:g} {src_t}, "
+                    f"whereas switching at market today yields only <b>{mkt_shares_frac:.2f} {tgt_t} shares</b> (₹{sale_proceeds:,.2f}). "
+                    f"Waiting for the demerger yields <b>+{abs(extra_shares):.2f} more {tgt_t} shares (+{abs(improvement_pct):.2f}% / +₹{abs(val_advantage_rs):,.2f} value advantage)</b> than switching in the open market."
+                )
+            else:
+                verdict_code = "PARITY_HOLD"
+                verdict_badge = f"🟡 NEAR PARITY — WAIT FOR DEMERGER (Spread Within 0.35% Friction & Tax Band)"
+                verdict_color = "#b45309"
+                verdict_bg = "#fffbeb"
+                verdict_border = "#f59e0b"
+                verdict_summary = (
+                    f"Market switch ratio (<b>{mkt_ratio_per_100:.2f} {tgt_t}</b>) and official demerger ratio (<b>{demerger_ratio_per_100:.2f} {tgt_t}</b>) "
+                    f"are within <b>{improvement_pct:+.2f}%</b> parity. After ~0.35% brokerage/slippage and capital gains tax on selling {src_t}, "
+                    f"holding for the tax-neutral demerger entitlement is preferred."
+                )
+
+            return {
+                "src_t": src_t, "src_name": src_name, "src_cmp": src_cmp,
+                "tgt_t": tgt_t, "tgt_name": tgt_name, "tgt_cmp": tgt_cmp,
+                "base_sh": base_sh, "swap_sh": swap_sh,
+                "sale_proceeds": sale_proceeds, "demerger_val": demerger_val,
+                "mkt_shares_frac": mkt_shares_frac, "mkt_ratio_per_100": mkt_ratio_per_100,
+                "demerger_ratio_per_100": demerger_ratio_per_100,
+                "extra_shares": extra_shares, "improvement_pct": improvement_pct,
+                "val_advantage_rs": val_advantage_rs, "whole_shares": whole_shares,
+                "cash_left_rs": cash_left_rs, "net_val_advantage_rs": net_val_advantage_rs,
+                "net_improvement_pct": net_improvement_pct,
+                "verdict_code": verdict_code, "verdict_badge": verdict_badge,
+                "verdict_color": verdict_color, "verdict_bg": verdict_bg,
+                "verdict_border": verdict_border, "verdict_summary": verdict_summary,
+            }
+
+        df_demerge_preview = catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"].sort_values(by="Catalyst Score", ascending=False)
+        detected_swap_opps = _extract_swap_opportunities(df_demerge_preview, catalyst_df, news_items_list)
+
         st.markdown("##### 🏢 Level 2: Corporate Action Catalyst Quadrant")
         st.caption("How Indian equities statistically react across specific corporate filings: Contracts, Mergers, Dividends, and Stock Splits.")
+
+        # Surface compact executive arbitrage summary right above the Level 2 tabs whenever an active opportunity exists
+        if detected_swap_opps:
+            top_calc = _compute_switch_comparison(detected_swap_opps[0])
+            st.markdown(
+                f"""
+                <div style="background:{top_calc['verdict_bg']}; border:1px solid {top_calc['verdict_border']}; border-left:6px solid {top_calc['verdict_border']}; border-radius:6px; padding:9px 14px; margin-bottom:8px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+                        <span style="font-weight:800; color:{top_calc['verdict_color']}; font-size:0.86rem;">
+                            🔄 {top_calc['src_t']} → {top_calc['tgt_t']} Market Switch Comparison: {top_calc['verdict_badge']}
+                        </span>
+                        <span style="font-size:0.78rem; font-weight:700; color:{top_calc['verdict_color']}; background:rgba(255,255,255,0.75); padding:2px 8px; border-radius:4px; border:1px solid {top_calc['verdict_border']};">
+                            Market Ratio: {top_calc['mkt_ratio_per_100']:.2f} vs Demerger: {top_calc['demerger_ratio_per_100']:.2f} ({top_calc['improvement_pct']:+.2f}% | ₹{top_calc['val_advantage_rs']:+,.2f})
+                        </span>
+                    </div>
+                    <div style="font-size:0.80rem; color:#1e293b; margin-top:4px;">
+                        {top_calc['verdict_summary']} <i>(Open the <b>🔄 Demergers & Mergers</b> tab below for the full step-by-step calculation table.)</i>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
         q_tab1, q_tab2, q_tab3, q_tab4 = st.tabs([
             f"🎯 Order Wins & Capex ({df_orders_c})",
@@ -1215,12 +1398,133 @@ if nav_choice == "🎯 Dynamic 1-2 Week Screener":
                 st.info("No fresh contract wins or capex announcements recorded in current batch.")
 
         with q_tab2:
-            df_demerge = catalyst_df[catalyst_df["Catalyst Group"] == "Demergers & Mergers"].sort_values(by="Catalyst Score", ascending=False)
+            df_demerge = df_demerge_preview
             if not df_demerge.empty:
                 render_table_freshness_banner("Demergers & Mergers Quadrant", "tab1_q_demerge")
                 st.dataframe(df_demerge[cols_quad].style.apply(apply_top3_bot3_styling, axis=None).format({"CMP (₹)": "₹{:.2f}", "Catalyst Score": "{:+.1f}", "P(1W) Drift %": "{}%", "P(2W) Drift %": "{}%", "Pre-RunUp 5D %": "{:+.2f}%", "Vol Surge Ratio": "{:.1f}x", "Close in Range %": "{:.1f}%"}), use_container_width=True)
             else:
                 st.info("No active demerger or merger filings tagged in current batch.")
+
+            # -----------------------------------------------------------------
+            # Summary Version of Market Switch vs. Demerger Calculation Table
+            # -----------------------------------------------------------------
+            st.markdown("<div style='margin-top: 0.75rem;'></div>", unsafe_allow_html=True)
+            st.markdown("##### ⚖️ Demerger / Merger Swap vs. Open-Market Switch Arbitrage Calculator")
+            st.caption("Evaluates live market prices against announced swap ratios to recommend whether to wait for the demerger/merger entitlement or switch immediately at market rate.")
+
+            all_tickers_sorted = sorted(catalyst_df["Ticker"].astype(str).unique().tolist())
+            default_src = detected_swap_opps[0]["source_ticker"] if detected_swap_opps else ("RECLTD" if "RECLTD" in all_tickers_sorted else all_tickers_sorted[0])
+            default_tgt = detected_swap_opps[0]["target_ticker"] if detected_swap_opps else ("PFC" if "PFC" in all_tickers_sorted else all_tickers_sorted[min(1, len(all_tickers_sorted) - 1)])
+            default_base_sh = float(detected_swap_opps[0]["base_source_shares"]) if detected_swap_opps else 100.0
+            default_swap_sh = float(detected_swap_opps[0]["swap_target_shares"]) if detected_swap_opps else 88.0
+
+            with st.expander("⚙️ Customize Swap Ratio / Compare Any Demerger or Merger Pair", expanded=False):
+                sw_c1, sw_c2, sw_c3, sw_c4 = st.columns(4)
+                with sw_c1:
+                    sel_src_ticker = st.selectbox("Source Stock (Holding / Transferor):", all_tickers_sorted, index=all_tickers_sorted.index(default_src) if default_src in all_tickers_sorted else 0, key="sw_src_t")
+                with sw_c2:
+                    sel_tgt_ticker = st.selectbox("Target Stock (Resulting / Acquirer):", all_tickers_sorted, index=all_tickers_sorted.index(default_tgt) if default_tgt in all_tickers_sorted else 0, key="sw_tgt_t")
+                with sw_c3:
+                    sel_base_shares = st.number_input(f"Base {sel_src_ticker} Shares Held:", min_value=1.0, max_value=1000000.0, value=default_base_sh, step=10.0, key="sw_base_sh")
+                with sw_c4:
+                    sel_swap_shares = st.number_input(f"Demerger {sel_tgt_ticker} Entitlement Shares:", min_value=0.01, max_value=1000000.0, value=default_swap_sh, step=1.0, key="sw_swap_sh")
+
+            src_row_live = catalyst_df[catalyst_df["Ticker"] == sel_src_ticker].iloc[0]
+            tgt_row_live = catalyst_df[catalyst_df["Ticker"] == sel_tgt_ticker].iloc[0]
+
+            active_opp_dict = {
+                "source_ticker": sel_src_ticker,
+                "source_name": str(src_row_live.get("Name", sel_src_ticker)),
+                "source_cmp": float(src_row_live["CMP (₹)"]),
+                "target_ticker": sel_tgt_ticker,
+                "target_name": str(tgt_row_live.get("Name", sel_tgt_ticker)),
+                "target_cmp": float(tgt_row_live["CMP (₹)"]),
+                "base_source_shares": sel_base_shares,
+                "swap_target_shares": sel_swap_shares,
+            }
+            sw_res = _compute_switch_comparison(active_opp_dict)
+
+            # Recommendation Banner inside Demergers & Mergers tab
+            st.markdown(
+                f"""
+                <div style="background:#0f294a; color:#ffffff; padding:8px 14px; border-radius:6px 6px 0 0; font-weight:700; font-size:0.92rem; display:flex; justify-content:space-between; align-items:center;">
+                    <span>📊 {sw_res['src_t']} → {sw_res['tgt_t']} Market Switch Comparison (Demerger gives {sw_res['swap_sh']:g} {sw_res['tgt_t']} for {sw_res['base_sh']:g} {sw_res['src_t']})</span>
+                    <span style="font-size:0.78rem; color:#bae6fd;">Live NSE CMPs: {sw_res['src_t']} ₹{sw_res['src_cmp']:,.2f} | {sw_res['tgt_t']} ₹{sw_res['tgt_cmp']:,.2f}</span>
+                </div>
+                <div style="background:{sw_res['verdict_bg']}; border:1px solid {sw_res['verdict_border']}; border-top:none; border-radius:0 0 6px 6px; padding:10px 14px; margin-bottom:10px;">
+                    <div style="font-weight:800; color:{sw_res['verdict_color']}; font-size:0.90rem; margin-bottom:3px;">
+                        {sw_res['verdict_badge']}
+                    </div>
+                    <div style="font-size:0.81rem; color:#1e293b;">
+                        {sw_res['verdict_summary']}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            sw_left_col, sw_right_col = st.columns([1.25, 2.25])
+            with sw_left_col:
+                st.markdown("**📌 Position & Entitlement Leg Summary**")
+                leg_df = pd.DataFrame([
+                    {
+                        "Stock / Leg": f"{sw_res['src_name']} (XNSE:{sw_res['src_t']})",
+                        "Live CMP (₹)": f"₹{sw_res['src_cmp']:,.2f}",
+                        "Shares": f"{sw_res['base_sh']:g}",
+                        "Market Value (₹)": f"₹{sw_res['sale_proceeds']:,.2f}",
+                    },
+                    {
+                        "Stock / Leg": f"{sw_res['tgt_name']} (XNSE:{sw_res['tgt_t']})",
+                        "Live CMP (₹)": f"₹{sw_res['tgt_cmp']:,.2f}",
+                        "Shares": f"{sw_res['swap_sh']:g}",
+                        "Market Value (₹)": f"₹{sw_res['demerger_val']:,.2f}",
+                    },
+                ])
+                render_table_freshness_banner(f"{sw_res['src_t']} vs {sw_res['tgt_t']} Swap Leg Valuation", "tab1_q_demerge_legs")
+                st.dataframe(leg_df, use_container_width=True, hide_index=True)
+                st.caption(
+                    f"ℹ️ **Swap Rule:** Demerger/Merger gives **{sw_res['swap_sh']:g} {sw_res['tgt_t']}** stock for **{sw_res['base_sh']:g} {sw_res['src_t']}** stock. "
+                    f"*Gross calculation excludes brokerage, taxes, slippage (~0.35% round-trip = ₹{sw_res['sale_proceeds'] * 0.0035:,.2f}) and any capital gains tax impact from selling {sw_res['src_t']}.*"
+                )
+
+            with sw_right_col:
+                st.markdown(f"**📋 {sw_res['src_t']} → {sw_res['tgt_t']} Market Switch Comparison Table**")
+                comp_rows = [
+                    {"Metric": f"{sw_res['src_t']} sale proceeds", "Result": f"₹{sw_res['sale_proceeds']:,.2f}", "Unit / interpretation": "₹ (Gross cash from selling source stock)"},
+                    {"Metric": f"{sw_res['tgt_t']} shares at market (fractional)", "Result": f"{sw_res['mkt_shares_frac']:.2f}", "Unit / interpretation": "shares"},
+                    {"Metric": "Market ratio", "Result": f"{sw_res['mkt_ratio_per_100']:.2f}", "Unit / interpretation": f"{sw_res['tgt_t']} per 100 {sw_res['src_t']}"},
+                    {"Metric": "Demerger ratio", "Result": f"{sw_res['demerger_ratio_per_100']:.2f}", "Unit / interpretation": f"{sw_res['tgt_t']} per 100 {sw_res['src_t']}"},
+                    {"Metric": f"Extra {sw_res['tgt_t']} vs demerger", "Result": f"{sw_res['extra_shares']:+.2f}", "Unit / interpretation": f"shares per {sw_res['base_sh']:g} {sw_res['src_t']}"},
+                    {"Metric": "Improvement vs demerger", "Result": f"{sw_res['improvement_pct']:+.2f}%", "Unit / interpretation": "% (Gross share count improvement)"},
+                    {"Metric": f"Value advantage at current {sw_res['tgt_t']} price", "Result": f"₹{sw_res['val_advantage_rs']:+,.2f}", "Unit / interpretation": "₹ (Gross advantage before friction)"},
+                    {"Metric": "Net value advantage (after 0.35% friction)", "Result": f"₹{sw_res['net_val_advantage_rs']:+,.2f} ({sw_res['net_improvement_pct']:+.2f}%)", "Unit / interpretation": "₹ (After brokerage, STT & slippage)"},
+                    {"Metric": f"Whole {sw_res['tgt_t']} shares purchasable", "Result": f"{sw_res['whole_shares']}", "Unit / interpretation": "shares (Executable whole shares)"},
+                    {"Metric": "Cash left after whole-share purchase", "Result": f"₹{sw_res['cash_left_rs']:,.2f}", "Unit / interpretation": "₹ (Residual cash balance)"},
+                    {"Metric": "Algorithmic Recommendation", "Result": "SWITCH AT MARKET" if sw_res["verdict_code"] == "SWITCH_AT_MARKET" else ("WAIT FOR DEMERGER" if sw_res["verdict_code"] == "WAIT_FOR_DEMERGER" else "HOLD / PARITY"), "Unit / interpretation": sw_res["verdict_badge"]},
+                ]
+                comp_df = pd.DataFrame(comp_rows)
+
+                def _style_switch_comp(df_in):
+                    styles = pd.DataFrame("", index=df_in.index, columns=df_in.columns)
+                    highlight_metrics = {
+                        f"Extra {sw_res['tgt_t']} vs demerger",
+                        "Improvement vs demerger",
+                        f"Value advantage at current {sw_res['tgt_t']} price",
+                        "Net value advantage (after 0.35% friction)",
+                        "Algorithmic Recommendation",
+                    }
+                    is_pos = sw_res["improvement_pct"] > 0.50
+                    is_neg = sw_res["improvement_pct"] < -0.35
+                    bg_col = "#dcfce7" if is_pos else ("#dbeafe" if is_neg else "#fef3c7")
+                    fg_col = "#166534" if is_pos else ("#1e40af" if is_neg else "#92400e")
+                    for idx_r, r_val in df_in.iterrows():
+                        if r_val["Metric"] in highlight_metrics:
+                            styles.loc[idx_r, :] = f"background-color: {bg_col}; color: {fg_col}; font-weight: 700;"
+                    return styles
+
+                render_table_freshness_banner(f"{sw_res['src_t']} → {sw_res['tgt_t']} Market Switch Comparison", "tab1_q_demerge_switch")
+                st.dataframe(comp_df.style.apply(_style_switch_comp, axis=None), use_container_width=True, hide_index=True, height=430)
+
 
         with q_tab3:
             df_div = catalyst_df[catalyst_df["Catalyst Group"] == "Dividends & Buybacks"].sort_values(by="Catalyst Score", ascending=False)
