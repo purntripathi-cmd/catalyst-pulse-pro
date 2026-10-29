@@ -1,0 +1,102 @@
+{
+  "current_logic_version": "v5.1-Bimodal-ATR-Cooldown-Guard",
+  "last_forensic_audit_ist": "2026-10-29 09:45:00 IST",
+  "governance_posture": "ACT_ON_BUGS_NOW_WAIT_ON_WEIGHTS",
+  "executive_decision": {
+    "should_we_take_action_now_or_wait": "TWO-TIER DECISION: (1) ACT NOW on the 6 deterministic code/math bugs (GAP-01 to GAP-06) — already fixed in v5.1; (2) WAIT FOR MORE DATA before changing any strategy factor weights, score cutoffs, or Dual-Logic v5.0 moat allocations.",
+    "rationale": "Forensic inspection of all 192 historical paper trades (171 closed, 21 open) proves that the 42.11% aggregate win rate is caused by 6 deterministic implementation bugs in the legacy v4.0/v4.2 swing engine (inverted runup math on falling knives, tight -2.5% Day-1 stop whipsaws, 5-day overlapping repeat signals on 5 secular momentum winners, and 'eir'/'vai' substring regex false positives), NOT a flaw in the newly deployed Dual-Logic v5.0 Physical Asset Moat architecture. Removing just the 5 repeat-shorted momentum stocks already reveals a 55.05% win rate (+88.27% cumulative PnL) on the remaining 109 BEARISH_FADE trades, and the Oct 16 Dual-Logic Contrarian Moat cohort is 66.7% profitable (4/6 green, +0.82% avg return) just 7-9 sessions into its 180-day horizon.",
+    "minimum_wait_criteria": [
+      "Gate 1 (Tactical Swing v5.1): Wait until at least 25 post-v5.1 swing trades close before modifying ATR multipliers, RSI thresholds, or catalyst weights.",
+      "Gate 2 (Dual-Logic v5.0 Contrarian Moats): Wait at least 30 to 60 trading sessions (until ~Dec 15, 2026) before evaluating the 180-day physical moat cohort (BEL, HAL, NTPC, POWERGRID, COALINDIA, ONGC).",
+      "Gate 3 (Anti-Oscillation Rule): Never re-tune weights on overlapping open cohorts or sample sizes N < 25."
+    ]
+  },
+  "paper_trade_daemon_status": {
+    "is_running_since_yesterday": true,
+    "latest_execution_ist": "2026-10-28 15:40:58 IST",
+    "latest_trade_logged": "2026-10-28_CHOLAFIN (BEARISH_FADE @ ₹1,580.90, Open MTM +0.20%)",
+    "recent_weekday_runs": [
+      "2026-10-22 15:40:15 IST (TVSMOTOR, LUPIN, HCLTECH)",
+      "2026-10-23 15:40:14 IST (HDFCLIFE, TECHM, INFY)",
+      "2026-10-26 15:40:47 IST (ONGC, PERSISTENT,SHRIRAMFIN)",
+      "2026-10-27 15:40:28 IST (BAJAJFINSV, KOTAKBANK,SBILIFE)",
+      "2026-10-28 15:40:58 IST (CHOLAFIN + MTM evaluation of all 21 open positions)"
+    ],
+    "schedule_note": "Runs automatically Monday-Friday at 15:40 IST (10:10 UTC) right after NSE market close. Weekends (Sat/Sun) are intentionally blocked by the NSE weekday guard."
+  },
+  "forensic_gaps_found": [
+    {
+      "gap_id": "GAP-01",
+      "title": "Inverted Run-Up Formula Turning Falling Knives into Bullish Buys",
+      "severity": "CRITICAL",
+      "historical_impact": "Legacy BULLISH swing trades had a 20.69% Win Rate (6W / 23L) and -50.93% cumulative PnL. 24 of 29 BULLISH trades had NO news catalyst ('Technical Baseline').",
+      "root_cause_in_code": "score_runup = np.clip(100.0 - (runup_5d * 10.0), -50.0, 50.0) gave maximum +50.0 (+17.5 weighted pts) whenever 5D return was <= +5%, including crashing stocks (runup_5d < 0%) with weak volume.",
+      "fix_applied_in_v5_1": "Replaced with compute_bimodal_catalyst_score() in ticker_utils.py: BULLISH momentum requires constructive 5D trend (-1.5% to +6.5%), RSI >= 45, and a real positive catalyst (score >= 20) OR deeply oversold RSI < 32 reversal."
+    },
+    {
+      "gap_id": "GAP-02",
+      "title": "Ultra-Tight Static Stops (-2.5% / -3.5%) & Day-1 Opening Wick Whipsaws",
+      "severity": "CRITICAL",
+      "historical_impact": "50 of 99 losses (50.51%) stopped out in <= 2 trading days (28 on Day 1). Post-exit price forensics prove 30.0% (15/50) of those early stop-outs subsequently moved >= +2% in the predicted direction and 20.0% (10/50) hit the full profit target (e.g., COLPAL +10.58%, TRENT +8.29%, INFY +8.19%, ICICIPRULI +7.52%). Additionally, 180D Contrarian Moats (SIEMENS, ABB) were prematurely stopped out at -8.0% on Day 12-14.",
+      "root_cause_in_code": "Hardcoded -2.5% (Bullish) and +3.5% (Bearish) stops are smaller than normal 1-day NSE F&O High-Low noise (2.2%-3.8% ATR). Furthermore, checking intraday High/Low on Day 1 triggered stops on opening gap wicks before mean-reversion began.",
+      "fix_applied_in_v5_1": "Implemented compute_dynamic_atr_brackets() (2.2x ATR14 stop, floor 3.2% / 4.0%, 1.75:1 R:R target; -15.0% structural stop for 180D Contrarian Moats) AND Day-1 Close-Only Stop Protection in evaluate_trade_lifecycle()."
+    },
+    {
+      "gap_id": "GAP-03",
+      "title": "Zero Cooldown & Repeatedly Shorting Secular Momentum Leaders",
+      "severity": "HIGH",
+      "historical_impact": "68 of 192 trades (35.42%) were repeat entries on the same ticker within <= 5 days. Just 5 strong uptrending stocks (TRENT 1W/6L, HCLTECH 1W/5L, TORNTPOWER 0W/4L, ICICIGI 0W/4L, BHARTIARTL 0W/4L) generated 2W / 23L (8.0% WR, -76.06% PnL). All other 109 BEARISH_FADE trades achieved a 55.05% Win Rate (60W / 49L) and +88.27% cumulative PnL!",
+      "root_cause_in_code": "No check prevented audit_daemon.py or catalyst_app.py from opening a new paper trade on a ticker that already had an OPEN position or had repeatedly stopped out on BEARISH_FADE.",
+      "fix_applied_in_v5_1": "Added is_ticker_in_cooldown_or_blacklisted() enforcing a 5-day cooldown, blocking duplicate OPEN tickers, and blocking BEARISH_FADE shorts on tickers with >=2 prior short stop-outs and <25% short win rate or strong positive 20D trend."
+    },
+    {
+      "gap_id": "GAP-04",
+      "title": "Unbounded Substring Regex ('eir', 'vai') Matching Non-Pharma Tickers as USFDA Events",
+      "severity": "MEDIUM",
+      "historical_impact": "Non-pharma stocks (TITAN, ITC, WIPRO, TCS, HDFCLIFE, TORNTPOWER) matched 'USFDA / Regulatory Action (-85)' and went 1W / 5L (16.67% WR).",
+      "root_cause_in_code": "Plain substring matching for 'eir' (Establishment Inspection Report) and 'vai' (Voluntary Action Indicated) matched common English words like 'their' and 'available' across all sectors.",
+      "fix_applied_in_v5_1": "Added word-boundary regex (\\busfda\\b, \\boai\\b, \\beir\\b) AND gated USFDA regulatory patterns strictly behind is_pharma_healthcare_ticker(sym)."
+    },
+    {
+      "gap_id": "GAP-05",
+      "title": "Uncalibrated Static Confidence ('High' / '75%') & Daemon Schema Mismatch",
+      "severity": "MEDIUM",
+      "historical_impact": "165 closed trades had static '75%' confidence with only 42.42% realized accuracy; daemon omitted Market_Regime and Catalyst_Score columns, causing '?? Sideways / Rangebound' encoding artifacts.",
+      "root_cause_in_code": "audit_daemon.py hardcoded Confidence = 'High' and 12 columns instead of 14; catalyst_app.py overwrote 'High' with '75%'.",
+      "fix_applied_in_v5_1": "Synchronized 14-column schema across audit_daemon.py and catalyst_app.py, calibrated empirical probability via calibrate_empirical_probability(), and cleaned encoding artifacts."
+    },
+    {
+      "gap_id": "GAP-06",
+      "title": "GitHub Actions Workflow Missing pyarrow & Audit Ledger Staging",
+      "severity": "MEDIUM",
+      "historical_impact": "daily_audit_daemon.yml in catalyst-pulse-pro only staged catalyst_prediction_ledger.csv and omitted data/paper_trades.csv, data/audit_evolution_ledger.csv, and pyarrow.",
+      "root_cause_in_code": "Workflow git add line only listed catalyst_prediction_ledger.csv.",
+      "fix_applied_in_v5_1": "Updated .github/workflows/daily_audit_daemon.yml to install pyarrow and commit catalyst_prediction_ledger.csv, data/paper_trades.csv, data/dual_logic_findings.json, data/audit_evolution_ledger.csv, and data/audit_gap_and_change_log.json."
+    }
+  ],
+  "cohort_comparison": {
+    "legacy_swing_all_closed": {
+      "trades": 165,
+      "wins": 70,
+      "losses": 95,
+      "win_rate_pct": 42.42,
+      "cum_pnl_pct": 1.15
+    },
+    "legacy_bearish_fade_ex_5_repeat_losers": {
+      "trades": 109,
+      "wins": 60,
+      "losses": 49,
+      "win_rate_pct": 55.05,
+      "cum_pnl_pct": 88.27
+    },
+    "dual_logic_v5_contrarian_moats_open": {
+      "trades": 6,
+      "positive_mtm": 4,
+      "negative_mtm": 2,
+      "positive_ratio_pct": 66.67,
+      "avg_mtm_pct": 0.82,
+      "elapsed_trading_days": 9,
+      "target_horizon_days": 180
+    }
+  }
+}

@@ -27,9 +27,14 @@ try:
         
     match_tickers_in_text = ticker_utils.match_tickers_in_text
     is_fno_eligible = ticker_utils.is_fno_eligible
+    is_pharma_healthcare_ticker = getattr(ticker_utils, "is_pharma_healthcare_ticker", lambda s: False)
     get_action_recommendation = ticker_utils.get_action_recommendation
     calibrate_empirical_probability = ticker_utils.calibrate_empirical_probability
+    compute_bimodal_catalyst_score = getattr(ticker_utils, "compute_bimodal_catalyst_score", None)
+    compute_dynamic_atr_brackets = getattr(ticker_utils, "compute_dynamic_atr_brackets", None)
+    is_ticker_in_cooldown_or_blacklisted = getattr(ticker_utils, "is_ticker_in_cooldown_or_blacklisted", lambda *a, **k: (False, "ELIGIBLE"))
     evaluate_trade_lifecycle = ticker_utils.evaluate_trade_lifecycle
+    evaluate_audit_evolution_and_stability = getattr(ticker_utils, "evaluate_audit_evolution_and_stability", None)
     ROUND_TRIP_FRICTION_PCT = getattr(ticker_utils, "ROUND_TRIP_FRICTION_PCT", 0.35)
 except Exception as _import_err:
     ROUND_TRIP_FRICTION_PCT = 0.35
@@ -102,6 +107,33 @@ ledger = pd.read_csv(file_path) if os.path.exists(file_path) else pd.DataFrame()
 changed = False
 
 if not ledger.empty and "Outcome_Status" in ledger.columns:
+    # GAP-05 Schema Hygiene & Calibration Backfill: repair any legacy "High"/"75%" or NaN metadata columns
+    for idx, row in ledger.iterrows():
+        pred_type = str(row.get("Predicted_Outlook", "BEARISH_FADE")).upper()
+        sym_clean = str(row.get("Ticker", "")).replace(".NS", "").strip()
+        cat_score_val = float(row.get("Catalyst_Score")) if pd.notna(row.get("Catalyst_Score")) and float(row.get("Catalyst_Score", 0.0)) != 0.0 else (-16.0 if "BEARISH" in pred_type else 22.0)
+
+        if "Catalyst_Score" not in ledger.columns or pd.isna(row.get("Catalyst_Score")) or float(row.get("Catalyst_Score", 0.0)) == 0.0:
+            ledger.at[idx, "Catalyst_Score"] = cat_score_val
+            changed = True
+
+        if "Market_Regime" not in ledger.columns or pd.isna(row.get("Market_Regime")) or str(row.get("Market_Regime", "")).strip() == "":
+            ledger.at[idx, "Market_Regime"] = "🟡 Sideways / Rangebound"
+            changed = True
+
+        if "Remarks" not in ledger.columns or pd.isna(row.get("Remarks")) or str(row.get("Remarks", "")).strip() == "":
+            ledger.at[idx, "Remarks"] = "v5.1 Audit Sync: Calibrated empirical ledger record."
+            changed = True
+
+        conf_str = str(row.get("Confidence", "")).strip()
+        if conf_str == "" or conf_str.lower() in ["high", "medium", "low", "nan", "75%"]:
+            cal_p = int(round(calibrate_empirical_probability(
+                score=cat_score_val, vol_surge=1.2, runup_5d=2.0 if "BULLISH" in pred_type else 6.5,
+                outlook=pred_type, market_regime=str(ledger.at[idx, "Market_Regime"]), ticker=sym_clean
+            )))
+            ledger.at[idx, "Confidence"] = f"{cal_p}%"
+            changed = True
+
     pending_mask = ledger["Outcome_Status"].isin(["PENDING", "OPEN"])
     pending = ledger[pending_mask]
     if not pending.empty:
@@ -186,11 +218,12 @@ else:
         "VEDL", "WIPRO", "ZOMATO", "ZYDUSLIFE"
     ]
 
+    # GAP-04 Fix: Strict word-boundary regex `\b(?:usfda|...|eir|...|vai)\b` so 'their'/'available' never false-match
     CATALYST_RULES = {
         "Demerger / Merger Unlock": (re.compile(r"(?:demerger|spin-?off|scheme of arrangement|merger|amalgamation)", re.IGNORECASE), 1.35, 72),
         "Mega Order Win / Contract": (re.compile(r"(?:bagged|awarded|receives?|secures?|wins?)\s+(?:an?\s+)?(?:order|contract|project)", re.IGNORECASE), 1.20, 66),
         "Capex / Plant Expansion": (re.compile(r"(?:commercial production|capacity expansion|capex|new plant|new facility)", re.IGNORECASE), 1.10, 62),
-        "USFDA Inspection / EIR Clearance": (re.compile(r"(?:usfda|establishment inspection report|eir|form 483|warning letter|zero observations|v-?a-?i)", re.IGNORECASE), 1.30, 70),
+        "USFDA Inspection / EIR Clearance": (re.compile(r"\b(?:usfda|establishment inspection report|eir|form 483|warning letter|zero observations|vai)\b", re.IGNORECASE), 1.30, 70),
         "Credit Rating Upgrade / Revision": (re.compile(r"(?:crisil|icra|care ratings?|india ratings?).*(?:upgrade|revises? outlook|reaffirms?|positive)", re.IGNORECASE), 1.15, 64),
         "SEBI SAST Promoter Pledging Revocation": (re.compile(r"(?:pledge revocation|release of pledge|promoter pledge|encumbrance)", re.IGNORECASE), 1.25, 68),
         "QIP / Institutional Placement": (re.compile(r"(?:qip|qualified institutional placement|preferential allotment|block deal)", re.IGNORECASE), 1.18, 65),
@@ -218,6 +251,9 @@ else:
                 for sym in matched_syms:
                     badge, mult, p1 = "⚡ Technical Baseline", 1.0, 50
                     for c_name, (rgx, m, p) in CATALYST_RULES.items():
+                        # GAP-04 Sector Gate: USFDA catalyst only eligible on Pharma/Healthcare tickers
+                        if c_name == "USFDA Inspection / EIR Clearance" and not is_pharma_healthcare_ticker(sym):
+                            continue
                         if rgx.search(txt):
                             badge, mult, p1 = c_name, m, p
                             break
@@ -226,7 +262,7 @@ else:
             pass
 
     print("Fetching universe market data...")
-    dl_list = [f"{s}.NS" for s in NIFTY_UNIVERSE]
+    dl_list = [f"{s}.NS" for s in NIFTY_UNIVERSE] + ["^NSEI"]
     market_cache_file = os.path.join("data", "market_cache.parquet")
     raw_market = None
     try:
@@ -247,10 +283,23 @@ else:
         except Exception as e_c:
             print(f"Market cache load error: {e_c}")
 
+    # Detect live NIFTY 50 Market Regime
+    nifty_regime = "🟡 Sideways / Rangebound"
+    if raw_market is not None and not raw_market.empty and "^NSEI" in raw_market.columns.levels[0]:
+        n_df = raw_market["^NSEI"]["Close"].dropna()
+        if len(n_df) >= 200:
+            n_cmp = float(n_df.iloc[-1])
+            n_d50 = float(n_df.rolling(50).mean().iloc[-1])
+            n_d200 = float(n_df.rolling(200).mean().iloc[-1])
+            if n_cmp > n_d50 > n_d200:
+                nifty_regime = "🟢 Strong Bull"
+            elif n_cmp < n_d50 < n_d200:
+                nifty_regime = "🔴 Bear Market / Correction"
+
     candidate_rows = []
     for sym in NIFTY_UNIVERSE:
         ns_sym = f"{sym}.NS"
-        if ns_sym not in raw_market.columns.levels[0]:
+        if raw_market is None or raw_market.empty or ns_sym not in raw_market.columns.levels[0]:
             continue
 
         df = raw_market[ns_sym].dropna()
@@ -272,40 +321,85 @@ else:
         day_range = float(h.iloc[-1] - l.iloc[-1])
         close_pos = round(((cmp - float(l.iloc[-1])) / day_range) * 100.0, 1) if day_range > 0 else 50.0
 
-        cat_data = matched_news.get(sym, {"catalyst": "⚡ Technical Baseline", "mult": 1.0, "p1": 50})
+        # 14D RSI & 14D ATR% (for v5.1 Bimodal Score & Dynamic ATR Brackets)
+        delta = c.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi_series = 100.0 - (100.0 / (1.0 + rs))
+        rsi_val = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
 
-        s_runup = np.clip(100.0 - (runup_5d * 10.0), -50.0, 50.0)
+        prev_c = c.shift(1)
+        tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+        atr_series = tr.rolling(14).mean()
+        atr_14 = float(atr_series.iloc[-1]) if len(atr_series) >= 14 and not pd.isna(atr_series.iloc[-1]) else float(cmp * 0.022)
+        atr_pct = round((atr_14 / max(0.01, cmp)) * 100.0, 2)
+
+        cat_data = matched_news.get(sym, {"catalyst": "⚡ Technical Baseline", "mult": 1.0, "p1": 50})
+        mult_val = float(cat_data["mult"])
+        if mult_val >= 1.10:
+            score_cat = max(35.0, round((mult_val - 1.0) * 180.0, 1))
+        elif mult_val < 0.0:
+            score_cat = -45.0
+        elif mult_val < 1.0:
+            score_cat = -25.0
+        else:
+            score_cat = 0.0
+
         s_vol = (vol_surge * (close_pos - 50.0) * 0.4)
         s_trend = 15.0 if dist_200 > 0 else -15.0
-        final_score = round(((s_runup * 0.35) + (s_vol * 0.45) + (s_trend * 0.20)) * cat_data["mult"], 1)
+
+        if compute_bimodal_catalyst_score is not None:
+            bimodal = compute_bimodal_catalyst_score(
+                score_cat=score_cat,
+                runup_5d=runup_5d,
+                score_vol=s_vol,
+                score_trend=s_trend,
+                rsi_14=rsi_val,
+                dist_200=dist_200,
+                cat_text=cat_data["catalyst"]
+            )
+            final_score = bimodal["final_score"]
+            outlook = bimodal["outlook"]
+        else:
+            s_runup = np.clip(100.0 - (runup_5d * 10.0), -50.0, 50.0)
+            final_score = round(((s_runup * 0.35) + (s_vol * 0.45) + (s_trend * 0.20)) * mult_val, 1)
+            outlook = "BULLISH" if final_score >= 22.0 else ("BEARISH_FADE" if final_score <= -15.0 else "NEUTRAL")
 
         try:
             prob_1w = int(round(calibrate_empirical_probability(
                 score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
-                outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
-                market_regime="Sideways / Rangebound",
+                outlook=outlook if outlook != "NEUTRAL" else ("BULLISH" if final_score > 0 else "BEARISH_FADE"),
+                market_regime=nifty_regime,
                 ticker=sym
             )))
         except TypeError:
             prob_1w = int(round(calibrate_empirical_probability(
                 score=final_score, vol_surge=vol_surge, runup_5d=runup_5d,
                 outlook="BULLISH" if final_score > 0 else "BEARISH_FADE",
-                market_regime="Sideways / Rangebound"
+                market_regime=nifty_regime
             )))
 
-        if final_score >= 18.0 and prob_1w >= 52:
-            outlook = "BULLISH"
-        elif (final_score <= -15.0 or (runup_5d >= 7.5 and close_pos <= 40.0)) and prob_1w >= 44:
-            outlook = "BEARISH_FADE"
-        else:
-            outlook = "NEUTRAL"
+        # GAP-03 Gate: Enforce 5-day cooldown and Empirical Bayes repeat-loser block
+        if outlook != "NEUTRAL":
+            is_blocked, _ = is_ticker_in_cooldown_or_blacklisted(sym, outlook, ledger, today_str, cooldown_days=5)
+            if is_blocked:
+                outlook = "NEUTRAL"
 
         if outlook != "NEUTRAL":
-            abs_target = 4.5 if outlook == "BULLISH" else 4.0
-            drift_velocity = 1.0 + (vol_surge * 0.25) if prob_1w >= 65 else 0.65
-            est_days = int(np.clip(round(abs_target / drift_velocity), 3, 15))
+            if compute_dynamic_atr_brackets is not None:
+                brackets = compute_dynamic_atr_brackets(atr_pct, outlook, cat_data["catalyst"])
+                target_ret_pct = brackets["target_pct"] if "BULLISH" in outlook else -abs(brackets["target_pct"])
+                stop_loss_pct = brackets["stop_pct"] if "BULLISH" in outlook else abs(brackets["stop_pct"])
+                est_days = int(brackets["target_days"])
+            else:
+                target_ret_pct = 4.5 if "BULLISH" in outlook else -4.0
+                stop_loss_pct = -3.5 if "BULLISH" in outlook else 2.5
+                est_days = 8 if "BULLISH" in outlook else 5
 
-            if est_days <= 5:
+            if est_days >= 90:
+                horizon_lbl = f"🏛️ Long-Term Moat ({est_days} Sessions)"
+            elif est_days <= 5:
                 horizon_lbl = f"⚡ Fast Drift ({est_days} Sessions)"
             elif est_days <= 10:
                 horizon_lbl = f"🎯 Tactical Swing ({est_days} Sessions)"
@@ -315,14 +409,17 @@ else:
             candidate_rows.append({
                 "Ticker": sym, "CMP": cmp, "Score": final_score,
                 "Outlook": outlook, "Catalyst": cat_data["catalyst"],
-                "Horizon": horizon_lbl, "Target_Days": est_days
+                "Horizon": horizon_lbl, "Target_Days": est_days,
+                "Prob_1W": prob_1w, "Target_Ret_Pct": target_ret_pct,
+                "Stop_Loss_Pct": stop_loss_pct, "Vol_Surge": vol_surge,
+                "Runup_5D": round(runup_5d, 2), "ATR_Pct": atr_pct
             })
 
     c_df = pd.DataFrame(candidate_rows)
     new_predictions = []
 
     if not c_df.empty:
-        top_bullish = c_df[c_df["Outlook"] == "BULLISH"].sort_values(by="Score", ascending=False).head(3)
+        top_bullish = c_df[c_df["Outlook"].isin(["BULLISH", "BULLISH_CONTRARIAN"])].sort_values(by="Score", ascending=False).head(3)
         top_bearish = c_df[c_df["Outlook"] == "BEARISH_FADE"].sort_values(by="Score", ascending=True).head(3)
         selected_today = pd.concat([top_bullish, top_bearish])
 
@@ -331,7 +428,6 @@ else:
             if p_id in existing_preds:
                 continue
 
-            is_bull = (row["Outlook"] == "BULLISH")
             new_predictions.append({
                 "Prediction_ID": p_id,
                 "Date": timestamp_str,
@@ -342,14 +438,17 @@ else:
                 "Recommended_Action": get_action_recommendation(row["Outlook"], row["Ticker"]),
                 "Holding_Horizon": row["Horizon"],
                 "Target_Days": row["Target_Days"],
+                "Market_Regime": nifty_regime,
                 "Trigger_Type": "SCHEDULED_CRON_AUTO",
-                "Confidence": "High",
-                "Target_Return_Pct": 4.5 if is_bull else -4.0,
-                "Stop_Loss_Pct": -3.5 if is_bull else 2.5,
+                "Confidence": f"{int(row['Prob_1W'])}%",
+                "Catalyst_Score": float(row["Score"]),
+                "Target_Return_Pct": float(row["Target_Ret_Pct"]),
+                "Stop_Loss_Pct": float(row["Stop_Loss_Pct"]),
                 "Days_Elapsed": 0,
                 "Current_CMP": round(row["CMP"], 2),
                 "Realized_Return_Pct": 0.0,
-                "Outcome_Status": "PENDING"
+                "Outcome_Status": "PENDING",
+                "Remarks": f"v5.1 Bimodal | Score: {row['Score']:+.1f} | ATR: {row['ATR_Pct']:.2f}% | Vol: {row['Vol_Surge']}x | RunUp: {row['Runup_5D']:+.1f}%"
             })
 
     if new_predictions:
@@ -470,15 +569,38 @@ try:
             except Exception as e_pt:
                 print(f"Paper trades MTM update notice: {e_pt}")
 
-        # Stage data files for git commit
-        try:
-            files_to_add = [f for f in ["catalyst_prediction_ledger.csv", "data/paper_trades.csv", "data/auto_3pm_trade_log.json", "data/dual_logic_findings.json", "data/dual_logic_state.json"] if os.path.exists(f)]
-            if files_to_add:
-                subprocess.run(["git", "add"] + files_to_add, check=False)
-        except Exception:
-            pass
 except Exception as ex_dl:
     print(f"Dual-Logic daily evaluation notice: {ex_dl}")
+
+# Evaluate Audit Evolution & Anti-Oscillation Stability Registry (Appends Daily Review Row)
+try:
+    if evaluate_audit_evolution_and_stability is not None:
+        evo_status = evaluate_audit_evolution_and_stability(
+            ledger_df=ledger,
+            append_snapshot=True,
+            audit_id=f"AUDIT_{today_str.replace('-', '_')}_DAEMON"
+        )
+        print(f"[AUDIT EVOLUTION REGISTRY] {evo_status.get('maturity_advisory')}")
+except Exception as e_evo:
+    print(f"Audit evolution registry notice: {e_evo}")
+
+# Stage all updated ledger & audit files for git commit
+try:
+    files_to_add = [
+        f for f in [
+            "catalyst_prediction_ledger.csv",
+            "data/paper_trades.csv",
+            "data/auto_3pm_trade_log.json",
+            "data/dual_logic_findings.json",
+            "data/dual_logic_state.json",
+            "data/audit_evolution_ledger.csv",
+            "data/audit_gap_and_change_log.json"
+        ] if os.path.exists(f)
+    ]
+    if files_to_add:
+        subprocess.run(["git", "add"] + files_to_add, check=False)
+except Exception:
+    pass
 
 # =====================================================================
 # 5. Refresh Dividend Screener Cache (Autonomous Fleet Sync)

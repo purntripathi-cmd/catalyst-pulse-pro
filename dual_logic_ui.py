@@ -62,23 +62,27 @@ from data_pipeline_20y import (
 
 PULSE_LEDGER_CSV = os.path.join(CURRENT_DIR, "catalyst_prediction_ledger.csv")
 
-# Calibrated 2026 market pricing for offline/weekend pricing across all 36 universe assets
-FALLBACK_UNIVERSE_CMP = {
-    "ABB.NS": 6900.00, "ADANIPORTS.NS": 1774.00, "AXISBANK.NS": 1222.20,
-    "BAJFINANCE.NS": 970.00, "BHARTIARTL.NS": 1779.90, "BHEL.NS": 429.00,
-    "BPCL.NS": 296.95, "COALINDIA.NS": 425.10, "CONCOR.NS": 442.00,
-    "CPSEETF.NS": 89.78, "GOLDBEES.NS": 121.43, "GRASIM.NS": 2962.00,
-    "HCLTECH.NS": 1201.90, "HDFCBANK.NS": 704.80, "HINDALCO.NS": 938.40,
-    "HINDUNILVR.NS": 1838.40, "ICICIBANK.NS": 1332.00, "INFY.NS": 1020.50,
-    "IOC.NS": 130.50, "ITC.NS": 268.90, "JSWSTEEL.NS": 1235.30,
-    "JUNIORBEES.NS": 747.52, "LT.NS": 3750.00, "NIFTYBEES.NS": 256.50,
-    "NTPC.NS": 315.10, "ONGC.NS": 224.90, "POWERGRID.NS": 257.00,
-    "RELIANCE.NS": 1186.40, "SBIN.NS": 958.00, "SIEMENS.NS": 3701.10,
-    "SUNPHARMA.NS": 1779.70, "TATAPOWER.NS": 351.50, "TATASTEEL.NS": 178.14,
-    "TCS.NS": 2114.40, "ULTRACEMCO.NS": 10710.00, "WIPRO.NS": 162.14
-}
-for _k in list(FALLBACK_UNIVERSE_CMP.keys()):
-    FALLBACK_UNIVERSE_CMP[_k.replace(".NS", "")] = FALLBACK_UNIVERSE_CMP[_k]
+@st.cache_data(ttl=900, show_spinner=False)
+def _load_cached_universe_cmp() -> dict:
+    """Loads latest empirical closing prices from local parquet caches without any hardcoded prices."""
+    cmp_map = {}
+    for cache_path in [MARKET_CACHE_FILE, os.path.join(DATA_DIR, "historical_20y_bars.parquet")]:
+        if os.path.exists(cache_path):
+            try:
+                df_cache = pd.read_parquet(cache_path)
+                if isinstance(df_cache.columns, pd.MultiIndex):
+                    for sym in df_cache.columns.levels[0]:
+                        clean = str(sym).replace(".NS", "").strip().upper()
+                        ns = f"{clean}.NS"
+                        if clean not in cmp_map and "Close" in df_cache[sym].columns:
+                            s = df_cache[sym]["Close"].dropna()
+                            if not s.empty:
+                                val = round(float(s.iloc[-1]), 2)
+                                cmp_map[clean] = val
+                                cmp_map[ns] = val
+            except Exception:
+                pass
+    return cmp_map
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -91,7 +95,7 @@ def fetch_live_market_quotes(tickers_tuple):
         return quotes
     try:
         ns_tickers = [f"{t}.NS" if not t.endswith(".NS") else t for t in tickers_tuple]
-        data = yf.download(ns_tickers, period="5d", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
+        data = yf.download(ns_tickers, period="5d", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=False)
         for t_orig in tickers_tuple:
             clean = t_orig.replace(".NS", "").strip().upper()
             ns = f"{clean}.NS"
@@ -113,103 +117,128 @@ def fetch_live_market_quotes(tickers_tuple):
     return quotes
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_complete_universe_technicals(tickers_tuple):
     """
     Fetches 1-year historical daily bars for universe tickers and computes:
     CMP, 52W High, 52W Low, Dist 52W High %, Dist 52W Low %, Weekly Low, Dist Weekly Low %,
-    Today Low, Dist Today Low %, 14D RSI, and Dist 200DMA %. Caches for 5 minutes.
+    Today Low, Dist Today Low %, 14D RSI, and Dist 200DMA %. Caches for 15 minutes.
+    Reuses MARKET_CACHE_FILE first to prevent duplicate Yahoo Finance API throttling.
     """
     results = {}
     if not tickers_tuple:
         return results
     ns_tickers = [f"{t}.NS" if not t.endswith(".NS") else t for t in tickers_tuple]
-    raw_dl = None
-    try:
-        raw_dl = yf.download(ns_tickers, period="1y", interval="1d", group_by="ticker", auto_adjust=True, progress=False)
-        if raw_dl is not None and not raw_dl.empty and len(raw_dl) > 10:
-            try:
-                raw_dl.to_parquet(MARKET_CACHE_FILE)
-            except Exception:
-                pass
-    except Exception as e:
-        logger.warning(f"yfinance download in technicals failed: {e}")
-
-    if (raw_dl is None or raw_dl.empty) and os.path.exists(MARKET_CACHE_FILE):
+    cached_dl = None
+    if os.path.exists(MARKET_CACHE_FILE):
         try:
-            raw_dl = pd.read_parquet(MARKET_CACHE_FILE)
-            logger.info("Loaded universe technicals from market_cache.parquet snapshot.")
+            cached_dl = pd.read_parquet(MARKET_CACHE_FILE)
         except Exception:
-            pass
+            cached_dl = None
 
-    if raw_dl is not None and not raw_dl.empty:
+    missing_ns = []
+    if cached_dl is not None and not cached_dl.empty and isinstance(cached_dl.columns, pd.MultiIndex):
+        avail_syms = set(cached_dl.columns.levels[0])
+        for ns in ns_tickers:
+            clean = ns.replace(".NS", "")
+            if ns not in avail_syms and clean not in avail_syms:
+                missing_ns.append(ns)
+    else:
+        missing_ns = list(ns_tickers)
+
+    raw_dl = None
+    if missing_ns:
         try:
-            for t in tickers_tuple:
-                clean = t.replace(".NS", "").strip().upper()
-                ns = f"{clean}.NS"
-                sub = pd.DataFrame()
-                if isinstance(raw_dl.columns, pd.MultiIndex):
-                    for cand in [ns, clean]:
-                        if cand in raw_dl.columns.levels[0]:
-                            sub = raw_dl[cand].dropna()
-                            break
-                else:
-                    if "Close" in raw_dl.columns:
-                        sub = raw_dl.dropna()
-
-                if not sub.empty and len(sub) >= 5:
-                    c, h, l = sub["Close"], sub["High"], sub["Low"]
-                    cmp_val = round(float(c.iloc[-1]), 2)
-                    l52 = round(float(l.min()), 2)
-                    h52 = round(float(h.max()), 2)
-                    w_low = round(float(l.iloc[-5:].min()), 2)
-                    d_low = round(float(l.iloc[-1]), 2)
-
-                    delta = c.diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                    rs = gain / loss.replace(0, np.nan)
-                    rsi_series = 100.0 - (100.0 / (1.0 + rs))
-                    rsi_val = round(float(rsi_series.iloc[-1]), 1) if len(c) >= 15 else 48.0
-                    if np.isnan(rsi_val):
-                        rsi_val = 48.0
-
-                    d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
-                    dist_200 = round(((cmp_val - d200) / max(0.01, d200)) * 100.0, 2)
-
-                    # Dynamic 14-day Average True Range (ATR)
-                    tr1 = h - l
-                    tr2 = (h - c.shift(1)).abs()
-                    tr3 = (l - c.shift(1)).abs()
-                    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-                    atr_series = tr.rolling(14).mean()
-                    atr_14 = float(atr_series.iloc[-1]) if len(tr) >= 14 else float(tr.mean())
-                    if np.isnan(atr_14) or atr_14 <= 0:
-                        atr_14 = round(cmp_val * 0.022, 2)
-                    else:
-                        atr_14 = round(atr_14, 2)
-                    atr_pct = round((atr_14 / max(1.0, cmp_val)) * 100.0, 2)
-
-                    rec = {
-                        "Ticker": clean,
-                        "CMP (₹)": cmp_val,
-                        "52W Low (₹)": l52,
-                        "52W High (₹)": h52,
-                        "Dist 52W High %": round(((cmp_val - h52) / max(1.0, h52)) * 100.0, 2),
-                        "Dist 52W Low %": round(((cmp_val - l52) / max(1.0, l52)) * 100.0, 2),
-                        "Weekly Low (₹)": w_low,
-                        "Dist Weekly Low %": round(((cmp_val - w_low) / max(1.0, w_low)) * 100.0, 2),
-                        "Today Low (₹)": d_low,
-                        "Dist Today Low %": round(((cmp_val - d_low) / max(1.0, d_low)) * 100.0, 2),
-                        "RSI (14D)": rsi_val,
-                        "Dist 200DMA %": dist_200,
-                        "ATR_14": atr_14,
-                        "ATR_Pct": atr_pct
-                    }
-                    results[clean] = rec
-                    results[ns] = rec
+            raw_dl = yf.download(missing_ns, period="1y", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=False)
+            if raw_dl is not None and not raw_dl.empty and len(raw_dl) > 10 and len(missing_ns) >= 50:
+                try:
+                    raw_dl.to_parquet(MARKET_CACHE_FILE)
+                except Exception:
+                    pass
         except Exception as e:
-            logger.warning(f"Error computing technicals: {e}")
+            logger.warning(f"yfinance download in technicals failed: {e}")
+
+    hist_20y_dl = None
+    hist_20y_path = os.path.join(DATA_DIR, "historical_20y_bars.parquet")
+
+    try:
+        for t in tickers_tuple:
+            clean = t.replace(".NS", "").strip().upper()
+            ns = f"{clean}.NS"
+            sub = pd.DataFrame()
+            for source_dl, single_len in [(raw_dl, len(missing_ns)), (cached_dl, 999)]:
+                if not sub.empty and len(sub) >= 5:
+                    break
+                if source_dl is not None and not source_dl.empty:
+                    if isinstance(source_dl.columns, pd.MultiIndex):
+                        for cand in [ns, clean]:
+                            if cand in source_dl.columns.levels[0]:
+                                sub = source_dl[cand].dropna()
+                                break
+                    else:
+                        if "Close" in source_dl.columns and single_len == 1:
+                            sub = source_dl.dropna()
+
+            if (sub.empty or len(sub) < 5) and os.path.exists(hist_20y_path):
+                try:
+                    if hist_20y_dl is None:
+                        hist_20y_dl = pd.read_parquet(hist_20y_path)
+                    if isinstance(hist_20y_dl.columns, pd.MultiIndex):
+                        for cand in [ns, clean]:
+                            if cand in hist_20y_dl.columns.levels[0]:
+                                sub = hist_20y_dl[cand].dropna().tail(252)
+                                break
+                except Exception:
+                    pass
+
+            if not sub.empty and len(sub) >= 5:
+                c, h, l = sub["Close"], sub["High"], sub["Low"]
+                cmp_val = round(float(c.iloc[-1]), 2)
+                l52 = round(float(l.tail(252).min()), 2)
+                h52 = round(float(h.tail(252).max()), 2)
+                w_low = round(float(l.iloc[-5:].min()), 2)
+                d_low = round(float(l.iloc[-1]), 2)
+
+                delta = c.diff()
+                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                rs = gain / loss.replace(0, np.nan)
+                rsi_series = 100.0 - (100.0 / (1.0 + rs))
+                rsi_val = round(float(rsi_series.dropna().iloc[-1]), 1) if not rsi_series.dropna().empty else 50.0
+
+                d200 = float(c.rolling(200).mean().iloc[-1]) if len(c) >= 200 else float(c.mean())
+                dist_200 = round(((cmp_val - d200) / max(0.01, d200)) * 100.0, 2)
+
+                # Dynamic 14-day Average True Range (ATR)
+                tr1 = h - l
+                tr2 = (h - c.shift(1)).abs()
+                tr3 = (l - c.shift(1)).abs()
+                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                atr_series = tr.rolling(14).mean()
+                atr_14 = float(atr_series.dropna().iloc[-1]) if not atr_series.dropna().empty else float(tr.mean())
+                atr_14 = round(max(0.01, atr_14), 2)
+                atr_pct = round((atr_14 / max(1.0, cmp_val)) * 100.0, 2)
+
+                rec = {
+                    "Ticker": clean,
+                    "CMP (₹)": cmp_val,
+                    "52W Low (₹)": l52,
+                    "52W High (₹)": h52,
+                    "Dist 52W High %": round(((cmp_val - h52) / max(1.0, h52)) * 100.0, 2),
+                    "Dist 52W Low %": round(((cmp_val - l52) / max(1.0, l52)) * 100.0, 2),
+                    "Weekly Low (₹)": w_low,
+                    "Dist Weekly Low %": round(((cmp_val - w_low) / max(1.0, w_low)) * 100.0, 2),
+                    "Today Low (₹)": d_low,
+                    "Dist Today Low %": round(((cmp_val - d_low) / max(1.0, d_low)) * 100.0, 2),
+                    "RSI (14D)": rsi_val,
+                    "Dist 200DMA %": dist_200,
+                    "ATR_14": atr_14,
+                    "ATR_Pct": atr_pct
+                }
+                results[clean] = rec
+                results[ns] = rec
+    except Exception as e:
+        logger.warning(f"Error computing technicals: {e}")
     return results
 
 
@@ -271,11 +300,12 @@ def trigger_dl_global_refresh():
     except Exception:
         pass
     sync_paper_trades_with_live_quotes()
-    now_ref = datetime.datetime.now(IST_TZ)
-    st.session_state["last_full_refresh_dt"] = now_ref
-    st.session_state["last_global_refresh_ts"] = now_ref
+    now_ist = datetime.datetime.now(IST_TZ)
+    st.session_state["last_full_refresh_dt"] = now_ist
+    st.session_state["last_global_refresh_ts"] = now_ist
     st.session_state["manual_refresh_count"] = st.session_state.get("manual_refresh_count", 0) + 1
     st.session_state["used_market_cache_fallback"] = False
+    st.session_state["_force_live_download"] = True
     if saved_active:
         st.session_state["_pending_nav_tab"] = saved_active
         try:
@@ -336,7 +366,7 @@ def render_dl_table_freshness_banner(table_name: str, data_ts_str: str = None, k
     manual_count = st.session_state.get("manual_refresh_count", 0)
     used_fallback = st.session_state.get("used_market_cache_fallback", False)
 
-    age_mins = ((now_ist - last_dt).total_seconds() / 60.0) if last_dt is not None else 999.0
+    age_mins = max(0.0, (now_ist - last_dt).total_seconds() / 60.0) if last_dt is not None else 999.0
     is_stale = (manual_count == 0) or (age_mins >= 15.0) or (used_fallback and manual_count == 0)
 
     c_ban, c_btn = st.columns([4.3, 0.7])
@@ -536,7 +566,9 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
     full_sym = candidate.get("Full_Ticker", f"{sym}.NS")
     cmp_val = float(candidate.get("CMP (₹)", 0.0))
     if cmp_val <= 0:
-        cmp_val = float(FALLBACK_UNIVERSE_CMP.get(full_sym, FALLBACK_UNIVERSE_CMP.get(sym, 1000.0)))
+        live_q = fetch_live_market_quotes((full_sym,))
+        fallback_map = _load_cached_universe_cmp()
+        cmp_val = float(live_q.get(full_sym) or live_q.get(sym) or fallback_map.get(full_sym) or fallback_map.get(sym, 0.0))
 
     # Guard against duplicates
     active_trades, _ = get_active_long_term_trades()
@@ -595,7 +627,7 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
         "Composite_Score_At_Entry": round(score * 100, 1),
         "Near_Support_Status": "True",
         "RSI_At_Entry": rsi_val,
-        "Empirical_Win_Rate_At_Entry": 79.2,
+        "Empirical_Win_Rate_At_Entry": round(float(candidate.get("Hist_20Y_Win_Rate_Pct", 60.7)), 1),
         "Market_Regime_At_Entry": "Contraction / Trough Deep-Value Moat"
     }
 
@@ -664,7 +696,7 @@ def execute_long_term_paper_trade(candidate, current_user="PulsePro_Trader", sav
     except Exception:
         pass
 
-    return True, f"Invested ₹50,000 in new long-term pick: {sym} ({qty} units @ ₹{cmp_val:.2f} = ₹{tranche_amt:,.2f})!"
+    return True, f"🌸 ॐ शुभ लाभाय नमः (Om Shubha Labhāya Namah) — Invested ₹50,000 in new long-term pick: {sym} ({qty} units @ ₹{cmp_val:.2f} = ₹{tranche_amt:,.2f})! May your trades be profitable."
 
 
 def square_off_long_term_paper_trade(trade_id, exit_cmp=None, exit_reason="Manual Profit-Taking / Exit"):
@@ -882,7 +914,7 @@ def render_active_long_term_portfolio_snapshot_section(
                     <div>
                         <span style="font-weight: 800; font-size: 1.05rem; color: #f8fafc;">🏛️ {title}</span>
                         <div style="font-size: 0.78rem; color: #94a3b8; margin-top: 2px;">
-                            Dual-Logic v5.0 Institutional Bear Resilience • Volatility-Calibrated Tranches • Zero-Duplicate Guard • Real-Time XIRR Return Engine
+                            Dual-Logic v5.0 Institutional Bear Resilience • Tag: <b>🛡️ BULLISH_CONTRARIAN / 🏢 Physical Moat</b> • <b>⏳ Recommended Holding Period: 180 Days – 3 Years (6M–36M Target)</b> • Real-Time XIRR Engine
                         </div>
                     </div>
                     <span style="background-color: #0284c7; color: white; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 700;">
@@ -899,7 +931,9 @@ def render_active_long_term_portfolio_snapshot_section(
         k2.metric("Current Valuation", f"₹{perf['total_current']:,.2f}", "Live CMP Valuation")
         k3.metric("Net Unrealized P&L", f"₹{perf['net_pnl_rs']:+,.2f}", f"{perf['net_pnl_pct']:+.2f}% MTM")
         k4.metric("Portfolio XIRR Return", perf['xirr_display'], f"🎯 Target: {perf['target_xirr_display']}")
-        k5.metric("P-WFCV Win Rate", "79.2% (GFC)", "Dyn ATR: 2.5× / 4.5×")
+        live_win_cnt = int((active_portfolio_df["PnL_Rs"] > 0).sum()) if "PnL_Rs" in active_portfolio_df.columns else 0
+        live_wr_pct = (live_win_cnt / max(1, len(active_portfolio_df))) * 100.0
+        k5.metric("Active MTM Win Rate", f"{live_wr_pct:.1f}% ({live_win_cnt}/{len(active_portfolio_df)})", "Dyn ATR: 2.5× / 4.5×")
 
         st.markdown("<div style='margin-top: 0.6rem;'></div>", unsafe_allow_html=True)
 
@@ -927,6 +961,8 @@ def render_active_long_term_portfolio_snapshot_section(
             target_xirr_col.append("+32.8% p.a.")
 
         disp_df["Asset Name"] = name_col
+        disp_df["Setup & Archetype Tag"] = "🛡️ BULLISH_CONTRARIAN • 🏢 Physical Moat"
+        disp_df["Rec. Holding Period"] = "180D–3Y (Target 6M–36M)"
         disp_df["Holding Age"] = days_held_col
         disp_df["Target XIRR"] = target_xirr_col
         disp_df["Duplicate Guard"] = "🔒 Active (No Re-buy)"
@@ -934,7 +970,9 @@ def render_active_long_term_portfolio_snapshot_section(
         rename_cols = {
             "Ticker": "Symbol",
             "Asset Name": "Asset / Company",
+            "Setup & Archetype Tag": "Setup & Archetype Tag",
             "Category": "Strategy / Physical Moat",
+            "Rec. Holding Period": "Rec. Holding Period",
             "Execution_Timestamp": "Entry Timestamp (IST)",
             "Holding Age": "Days Held",
             "Entry_Price": "Entry Price (₹)",
@@ -951,7 +989,8 @@ def render_active_long_term_portfolio_snapshot_section(
         }
 
         cols_order = [
-            "Symbol", "Asset / Company", "Strategy / Physical Moat", "Entry Timestamp (IST)", 
+            "Symbol", "Asset / Company", "Setup & Archetype Tag", "Strategy / Physical Moat",
+            "Rec. Holding Period", "Entry Timestamp (IST)", 
             "Days Held", "Entry Price (₹)", "Live CMP (₹)", "Qty", "Invested Capital (₹)", 
             "Current Value (₹)", "Unrealized P&L (₹)", "Return %", "Stop-Loss (₹)", 
             "Target (₹)", "Target XIRR (180D)", "Duplicate Guard"
@@ -1038,6 +1077,18 @@ def render_active_long_term_portfolio_snapshot_section(
                 - **Target XIRR**: A +15.0% price target achieved across the 180-day holding horizon translates to **+32.8% Annualized XIRR**.
                 """
             )
+
+        st.markdown(
+            """
+            <div style="margin-top: 0.6rem; padding: 8px 12px; background: #fffbeb; border: 1px solid #fde68a; border-left: 4px solid #d97706; border-radius: 6px; font-size: 0.78rem; color: #78350f;">
+                🌱 <b>Lakshmi Beej Mantra (For Growth & Seed Capital Compounding):</b>
+                <b>ॐ श्रीं ह्रीं श्रीं कमले कमलालये प्रसीद प्रसीद श्रीं ह्रीं श्रीं महालक्ष्म्यै नमः</b>
+                <i>(Om Shreem Hreem Shreem Kamale Kamalalaye Praseeda Praseeda Shreem Hreem Shreem Mahalakshmyai Namah)</i>
+                &nbsp;•&nbsp; 🌸 <b>ॐ शुभ लाभाय नमः</b> <i>(Om Shubha Labhāya Namah)</i>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     if as_expander:
         with st.expander(f"💼 {title} ({len(active_portfolio_df)} Active Positions)", expanded=(len(active_portfolio_df) > 0)):
@@ -1982,7 +2033,7 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             live_market_lookup[t] = r_dict
             live_market_lookup[t_clean] = r_dict
 
-    # Ensure ALL 36 universe assets have live market quotes and technicals (fetches missing stocks & ETFs)
+    # Ensure ALL 36 universe assets have full live market quotes and OHLCV technicals (fetches missing stocks & ETFs)
     missing_universe = []
     for p in UNIVERSE_PROFILES:
         t_clean = p["ticker"].replace(".NS", "").strip().upper()
@@ -1995,7 +2046,14 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         else:
             try:
                 c_val = float(rec.get("CMP (₹)", 0.0) if hasattr(rec, "get") else getattr(rec, "CMP (₹)", 0.0))
-                if c_val <= 0:
+                has_full_tech = (
+                    isinstance(rec, dict)
+                    and float(rec.get("ATR_14", 0.0) or 0.0) > 0
+                    and float(rec.get("52W Low (₹)", 0.0) or rec.get("52W_Low", 0.0) or 0.0) > 0
+                    and float(rec.get("Weekly Low (₹)", 0.0) or 0.0) > 0
+                    and float(rec.get("Today Low (₹)", 0.0) or 0.0) > 0
+                )
+                if c_val <= 0 or not has_full_tech:
                     missing_universe.append(t_ns)
             except Exception:
                 missing_universe.append(t_ns)
@@ -2003,12 +2061,24 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
     if missing_universe:
         fetched_universe_tech = fetch_complete_universe_technicals(tuple(sorted(set(missing_universe))))
         for k, v in fetched_universe_tech.items():
-            live_market_lookup[k] = v
+            if k in live_market_lookup and isinstance(live_market_lookup[k], dict):
+                merged = dict(v)
+                if float(live_market_lookup[k].get("CMP (₹)", 0.0) or 0.0) > 0:
+                    merged["CMP (₹)"] = float(live_market_lookup[k]["CMP (₹)"])
+                live_market_lookup[k] = merged
+            else:
+                live_market_lookup[k] = v
 
     # Fetch active portfolio positions for duplicate check
     active_trades, _ = get_active_long_term_trades(live_market_lookup)
 
-    fallback_cmp = FALLBACK_UNIVERSE_CMP
+    fallback_cmp = _load_cached_universe_cmp()
+    latest_grid_load = 0.88
+    if engine is not None and getattr(engine, "data", None) is not None and not engine.data.empty and "Power_Grid_Load_Index" in engine.data.columns:
+        try:
+            latest_grid_load = float(engine.data["Power_Grid_Load_Index"].dropna().iloc[-1])
+        except Exception:
+            pass
 
     records = []
     for p in UNIVERSE_PROFILES:
@@ -2036,77 +2106,18 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         dii_12m_chg = float(p.get("dii_12m_chg", 1.8))
         inst_trend = p.get("inst_trend", f"🟢 Institutional Accumulation (FII {fii_12m_chg:+.1f}%, DII {dii_12m_chg:+.1f}%)")
 
-        matched = live_market_lookup.get(ticker)
-        if matched is None:
-            matched = live_market_lookup.get(ticker_clean)
-        if matched is not None:
-            try:
-                cmp_val = float(matched.get("CMP (₹)", 0.0))
-            except (ValueError, TypeError):
-                cmp_val = 0.0
-            try:
-                rsi_val = float(matched.get("RSI (14D)", 48.0))
-            except (ValueError, TypeError):
-                rsi_val = 48.0
-            try:
-                dist_200 = float(matched.get("Dist 200DMA %", 0.0))
-            except (ValueError, TypeError):
-                dist_200 = 0.0
-            try:
-                low_52w = float(matched.get("52W Low (₹)", 0.0) or matched.get("52W_Low", 0.0))
-                if low_52w <= 0:
-                    low_52w = round(cmp_val * 0.88, 2)
-            except (ValueError, TypeError):
-                low_52w = round(cmp_val * 0.88, 2)
-            try:
-                dist_52w_low = float(matched.get("Dist 52W Low %", ((cmp_val - low_52w) / max(1.0, low_52w)) * 100.0))
-            except (ValueError, TypeError):
-                dist_52w_low = ((cmp_val - low_52w) / max(1.0, low_52w)) * 100.0
-            try:
-                weekly_low = float(matched.get("Weekly Low (₹)", 0.0))
-                if weekly_low <= 0:
-                    weekly_low = round(cmp_val * 0.98, 2)
-            except (ValueError, TypeError):
-                weekly_low = round(cmp_val * 0.98, 2)
-            try:
-                dist_weekly_low = float(matched.get("Dist Weekly Low %", ((cmp_val - weekly_low) / max(1.0, weekly_low)) * 100.0))
-            except (ValueError, TypeError):
-                dist_weekly_low = ((cmp_val - weekly_low) / max(1.0, weekly_low)) * 100.0
-            try:
-                day_low = float(matched.get("Today Low (₹)", 0.0))
-                if day_low <= 0:
-                    day_low = round(cmp_val * 0.992, 2)
-            except (ValueError, TypeError):
-                day_low = round(cmp_val * 0.992, 2)
-            try:
-                dist_day_low = float(matched.get("Dist Today Low %", ((cmp_val - day_low) / max(1.0, day_low)) * 100.0))
-            except (ValueError, TypeError):
-                dist_day_low = ((cmp_val - day_low) / max(1.0, day_low)) * 100.0
-            try:
-                dist_52w_high = float(matched.get("Dist 52W High %", -12.0))
-            except (ValueError, TypeError):
-                dist_52w_high = -12.0
-
-            drawdown = abs(dist_52w_high) / 100.0
-            if cmp_val <= 0:
-                cmp_val = float(fallback_cmp.get(ticker) or fallback_cmp.get(ticker_clean, 1000.0))
-                low_52w = round(cmp_val * 0.88, 2)
-                dist_52w_low = round(((cmp_val - low_52w) / low_52w) * 100.0, 1)
-                weekly_low = round(cmp_val * 0.98, 2)
-                dist_weekly_low = round(((cmp_val - weekly_low) / weekly_low) * 100.0, 1)
-                day_low = round(cmp_val * 0.992, 2)
-                dist_day_low = round(((cmp_val - day_low) / day_low) * 100.0, 1)
-        else:
-            cmp_val = float(fallback_cmp.get(ticker) or fallback_cmp.get(ticker_clean, 1000.0))
-            rsi_val = 44.5
-            dist_200 = -1.8
-            low_52w = round(cmp_val * 0.875, 2)
-            dist_52w_low = round(((cmp_val - low_52w) / low_52w) * 100.0, 1)
-            weekly_low = round(cmp_val * 0.978, 2)
-            dist_weekly_low = round(((cmp_val - weekly_low) / weekly_low) * 100.0, 1)
-            day_low = round(cmp_val * 0.992, 2)
-            dist_day_low = round(((cmp_val - day_low) / day_low) * 100.0, 1)
-            drawdown = 0.14
+        matched = live_market_lookup.get(ticker) or live_market_lookup.get(ticker_clean) or {}
+        cmp_val = float(matched.get("CMP (₹)", 0.0) or fallback_cmp.get(ticker) or fallback_cmp.get(ticker_clean, 0.0))
+        rsi_val = float(matched.get("RSI (14D)", 50.0))
+        dist_200 = float(matched.get("Dist 200DMA %", 0.0))
+        low_52w = float(matched.get("52W Low (₹)", 0.0) or matched.get("52W_Low", 0.0) or cmp_val)
+        dist_52w_low = float(matched.get("Dist 52W Low %", ((cmp_val - low_52w) / max(1.0, low_52w)) * 100.0))
+        weekly_low = float(matched.get("Weekly Low (₹)", 0.0) or cmp_val)
+        dist_weekly_low = float(matched.get("Dist Weekly Low %", ((cmp_val - weekly_low) / max(1.0, weekly_low)) * 100.0))
+        day_low = float(matched.get("Today Low (₹)", 0.0) or cmp_val)
+        dist_day_low = float(matched.get("Dist Today Low %", ((cmp_val - day_low) / max(1.0, day_low)) * 100.0))
+        dist_52w_high = float(matched.get("Dist 52W High %", 0.0))
+        drawdown = abs(dist_52w_high) / 100.0
 
         # Strict Dual-Logic v5.0 Production Formula (Solvency-Adjusted Balance Health + 20Y Empirical Track Record)
         w_de = w.get("debt_eq", 0.26)
@@ -2122,7 +2133,7 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
         dd_term = min(1.0, drawdown * 2.2) * w_dd
         moat_term = asset_moat * w_am
         ic_term = min(1.0, max(0.0, (ic - 1.0) / 14.0)) * w_ic
-        grid_term = 0.88 * w_grid
+        grid_term = latest_grid_load * w_grid
         ai_term = (1.0 - ai_vuln) * w_ai
 
         raw_score = debt_term + dd_term + moat_term + ic_term + grid_term + ai_term
@@ -2261,6 +2272,9 @@ def compute_live_deep_value_candidates(stocks_df=None, etfs_df=None, base_budget
             "Name": name,
             "Sector": sector,
             "Moat_Type": moat_type,
+            "Setup_Tag": "🛡️ BULLISH_CONTRARIAN",
+            "Catalyst_Archetype": "🏢 Physical Moats (Energy/Grid/CapGoods)",
+            "Rec_Holding_Period": "180D–3Y (6M–36M Moat)",
             "CMP (₹)": cmp_val,
             "Composite_Score": round(norm_score, 3),
             "Dual_Logic_Score": round(norm_score, 3),
@@ -2577,9 +2591,9 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
 
     st.markdown(
         f"""
-        <div style="background: #f1f5f9; padding: 8px 14px; border-radius: 6px; font-size: 0.82rem; color: #1e293b; margin: 8px 0 10px 0; display: flex; justify-content: space-between; align-items: center; border-left: 4px solid #059669;">
+        <div style="background: #f1f5f9; padding: 8px 14px; border-radius: 6px; font-size: 0.82rem; color: #1e293b; margin: 8px 0 10px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; border-left: 4px solid #059669;">
             <span><b>Category 6 Moat Breadth Pulse:</b> 🟢 High-Conviction Buys: <b>{len(buy_picks)} ({buy_pct:.0f}%)</b> | 🟡 Watchlist Dips: <b>{len(watch_picks)} ({watch_pct:.0f}%)</b> | ⚪ Capital Preservation: <b>{len(neutral_picks)}</b></span>
-            <span>🔒 Engine: <b>Locked Production (v5.0)</b> | 20Y Out-of-Sample Win Rate: <b>{win_rate_20y_str}</b> | Target: <b>&ge; 10% CAGR</b></span>
+            <span>🏷️ Tags: <b>🛡️ BULLISH_CONTRARIAN • 🏢 Physical Moats</b> | 🏆 20Y Success Rate: <b>{win_rate_20y_str}</b> | ⏳ Rec. Holding Period: <b>180 Days – 3 Years (6M–36M)</b></span>
         </div>
         """,
         unsafe_allow_html=True
@@ -2701,7 +2715,8 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
             filtered_table = filtered_table[filtered_table["Action_Signal"].str.contains("HIGH-CONVICTION|WATCHLIST", na=False)]
 
         disp_cols = [
-            "Ticker", "Name", "Sector", "CMP (₹)", "Composite_Score", "Hist_20Y_Win_Rate_Pct", "Hist_Median_3Y_CAGR_Pct",
+            "Ticker", "Name", "Sector", "Setup_Tag", "Catalyst_Archetype", "Rec_Holding_Period",
+            "CMP (₹)", "Composite_Score", "Hist_20Y_Win_Rate_Pct", "Hist_Median_3Y_CAGR_Pct",
             "Technical_Score", "Fundamental_Score", "Merton_DD", "Altman_Z_Double_Prime", "ATR_14", "RSI (14D)",
             "52W_Low (₹)", "Dist_52W_Low_Pct", "Weekly_Low (₹)", "Dist_Weekly_Low_Pct",
             "Day_Low (₹)", "Dist_Day_Low_Pct", "FII_Pct", "FII_12M_Chg", "DII_Pct", "DII_12M_Chg", "Institutional_Trend",
@@ -2711,6 +2726,9 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
         valid_cols = [c for c in disp_cols if c in filtered_table.columns]
 
         rename_cols = {
+            "Setup_Tag": "Setup Tag",
+            "Catalyst_Archetype": "Catalyst Archetype",
+            "Rec_Holding_Period": "Rec. Holding Period",
             "Composite_Score": "Composite Score 🟢 HTB",
             "Hist_20Y_Win_Rate_Pct": "20Y Win Rate % 🟢 HTB",
             "Hist_Median_3Y_CAGR_Pct": "20Y Med CAGR % 🟢 HTB",
@@ -2797,7 +2815,7 @@ def render_tab1_section6_bear_market_recommendations(stocks_market_df=None, etfs
         with c_rm1:
             if st.button("🔄 Rerun 20Y Analytics Pipeline", key="btn_rerun_20y_analytics", use_container_width=True, help="Reruns the full 20-year (2006–2026) multi-regime backtest across 756 stress points and updates the validation matrix."):
                 with st.spinner("Rerunning 20-Year Historical Analytics & Stress-Cycle Evaluations..."):
-                    engine.generate_validation_matrix()
+                    engine.generate_validation_matrix(force_recompute=True)
                     trigger_dl_global_refresh()
 
         matrix_df = engine.generate_validation_matrix()
