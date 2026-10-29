@@ -271,11 +271,13 @@ def trigger_dl_global_refresh():
     except Exception:
         pass
     sync_paper_trades_with_live_quotes()
-    st.session_state["last_full_refresh_dt"] = datetime.datetime.now(IST_TZ)
+    now_ref = datetime.datetime.now(IST_TZ)
+    st.session_state["last_full_refresh_dt"] = now_ref
+    st.session_state["last_global_refresh_ts"] = now_ref
     st.session_state["manual_refresh_count"] = st.session_state.get("manual_refresh_count", 0) + 1
     st.session_state["used_market_cache_fallback"] = False
     if saved_active:
-        st.session_state["active_nav_tab"] = saved_active
+        st.session_state["_pending_nav_tab"] = saved_active
         try:
             st.query_params["tab"] = saved_active
         except Exception:
@@ -328,12 +330,14 @@ def render_dl_table_freshness_banner(table_name: str, data_ts_str: str = None, k
         unsafe_allow_html=True,
     )
     now_ist = datetime.datetime.now(IST_TZ)
-    last_dt = st.session_state.get("last_full_refresh_dt", None)
+    last_dt = st.session_state.get("last_full_refresh_dt", None) or st.session_state.get("last_global_refresh_ts", None)
+    if last_dt is not None and getattr(last_dt, "tzinfo", None) is None:
+        last_dt = last_dt.replace(tzinfo=IST_TZ)
     manual_count = st.session_state.get("manual_refresh_count", 0)
     used_fallback = st.session_state.get("used_market_cache_fallback", False)
 
     age_mins = ((now_ist - last_dt).total_seconds() / 60.0) if last_dt is not None else 999.0
-    is_stale = (manual_count == 0) or (age_mins > 15.0) or used_fallback
+    is_stale = (manual_count == 0) or (age_mins >= 15.0) or (used_fallback and manual_count == 0)
 
     c_ban, c_btn = st.columns([4.3, 0.7])
     with c_ban:

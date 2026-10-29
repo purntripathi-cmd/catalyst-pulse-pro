@@ -911,6 +911,11 @@ NAV_TABS = [
 ]
 
 url_tab = st.query_params.get("tab", None)
+if "_pending_nav_tab" in st.session_state:
+    pending_tab = st.session_state.pop("_pending_nav_tab", None)
+    if pending_tab in NAV_TABS:
+        st.session_state["active_nav_tab"] = pending_tab
+        url_tab = pending_tab
 if "active_nav_tab" not in st.session_state:
     if url_tab in NAV_TABS:
         st.session_state["active_nav_tab"] = url_tab
@@ -923,6 +928,8 @@ if "last_global_refresh_ts" not in st.session_state:
     st.session_state["last_global_refresh_ts"] = datetime.datetime.now(IST)
 if "manual_refresh_count" not in st.session_state:
     st.session_state["manual_refresh_count"] = 0
+if "last_full_refresh_dt" not in st.session_state:
+    st.session_state["last_full_refresh_dt"] = st.session_state["last_global_refresh_ts"]
 
 def trigger_full_app_refresh():
     """Purges all caches, re-syncs live market quotes, RSS filings, GitHub ledger, and Dual-Logic tables, then reruns on the active tab."""
@@ -940,13 +947,15 @@ def trigger_full_app_refresh():
         pass
     st.session_state["last_global_refresh_ts"] = datetime.datetime.now(IST)
     st.session_state["manual_refresh_count"] = st.session_state.get("manual_refresh_count", 0) + 1
-    st.session_state["active_nav_tab"] = saved_active
+    st.session_state["last_full_refresh_dt"] = st.session_state["last_global_refresh_ts"]
+    st.session_state["used_market_cache_fallback"] = False
+    st.session_state["_pending_nav_tab"] = saved_active
     st.query_params["tab"] = saved_active
     st.rerun()
 
 def _get_app_freshness_state(data_ts_str: str = ""):
     now_ist = datetime.datetime.now(IST)
-    last_ref = st.session_state.get("last_global_refresh_ts", now_ist)
+    last_ref = st.session_state.get("last_global_refresh_ts", None) or st.session_state.get("last_full_refresh_dt", now_ist)
     if getattr(last_ref, "tzinfo", None) is None:
         last_ref = last_ref.replace(tzinfo=IST)
     age_mins = max(0.0, (now_ist - last_ref).total_seconds() / 60.0)
@@ -966,7 +975,7 @@ def _get_app_freshness_state(data_ts_str: str = ""):
         except Exception:
             pass
 
-    is_stale = (manual_cnt == 0) or (age_mins >= 15.0) or is_cache_fb or is_old_record
+    is_stale = (manual_cnt == 0) or (age_mins >= 15.0) or (is_cache_fb and manual_cnt == 0) or is_old_record
     return is_stale, age_mins, last_ref, fetched_str, is_cache_fb
 
 def render_tab_refresh_bar(tab_label: str, key_suffix: str):
